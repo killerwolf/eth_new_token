@@ -1,4 +1,4 @@
-# ERC-20 Holder Detector
+# ERC-20 New Token Detector
 
 The ERC-20 Detector is a Node.js script that detects fully minted ERC-20 tokens and provides links to various platforms for tracking the token's holders.
 
