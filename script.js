@@ -10,11 +10,12 @@ const eth = web3.eth;
 
 const mode = process.argv[2];
 
-const displayTokenDetails = async (contractAddress) => {
+const displayTokenDetails = async (contractAddress, holderAddress = null) => {
   try {
     const erc20Contract = new web3.eth.Contract(abi, contractAddress);
     const symbol = await erc20Contract.methods.symbol().call();
     const name = await erc20Contract.methods.name().call();
+    const holderLink = holderAddress ? `\nHolder: https://debank.com/profile/${holderAddress}` : '';
 
     console.log(`New ERC-20 token detected: ${name} (${symbol})`);
     console.log(`Contract address: ${contractAddress}`);
@@ -22,6 +23,7 @@ const displayTokenDetails = async (contractAddress) => {
     console.log(`EtherScan: https://etherscan.io/address/${contractAddress}`);
     console.log(`TokenSniffer: https://tokensniffer.com/token/eth/${contractAddress}`);
     console.log(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${contractAddress}`);
+    console.log(holderLink);
   } catch (error) {
     console.error(`Error checking ERC20 interface: ${error}`);
   }
@@ -109,11 +111,12 @@ console.log(log);
       const erc20Contract = new web3.eth.Contract(abi, contractAddress);
       try {
         const totalSupply = await erc20Contract.methods.totalSupply().call();
-        if(value === totalSupply)
-          await displayTokenDetails(contractAddress);
-      } catch (error) {
-        console.error(`Error checking ERC20 interface: ${error}`);
+        if (value === totalSupply.toString()) {
+          await displayTokenDetails(contractAddress, to);
       }
+    } catch (error) {
+        console.error(`Error checking ERC20 interface: ${error}`);
+    }
 
     } catch (error) {
       console.error(`Error processing log: ${error}`);
