@@ -29,8 +29,17 @@ function scrub(arg: unknown): unknown {
  * handling. Route those through the same scrubbing so API keys in URLs never reach the output,
  * and socket ErrorEvents collapse to one line instead of a raw object dump on every attempt.
  */
+/** Logging must never throw (a hostile Proxy or throwing inspect hook would skip our exit paths). */
+function safeScrub(arg: unknown): unknown {
+  try {
+    return scrub(arg);
+  } catch {
+    return '[unprintable]';
+  }
+}
+
 export function makeSafeLogger(log: Logger): Logger {
-  return (...args) => log(...args.map(scrub));
+  return (...args) => log(...args.map(safeScrub));
 }
 
 export function installSafeConsole(target: Pick<Console, 'error' | 'warn'> = console): void {

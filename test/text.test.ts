@@ -24,6 +24,13 @@ describe('sanitizeLabel', () => {
     expect(sanitizeLabel('www.evil.co.uk/airdrop')).toBe('www[.]evil[.]co[.]uk/airdrop');
   });
 
+  it('defangs non-ASCII domains and ideographic dots too', () => {
+    expect(sanitizeLabel('café.com')).toBe('café[.]com');
+    expect(sanitizeLabel('evil.рф')).toBe('evil[.]рф');
+    expect(sanitizeLabel('evil\u3002com')).toBe('evil[.]com');
+    expect(sanitizeLabel('evil\uFF0Ecom')).toBe('evil[.]com');
+  });
+
   it('does not mangle ordinary names containing dots between digits or before spaces', () => {
     expect(sanitizeLabel('Pepe 2.0')).toBe('Pepe 2.0');
     expect(sanitizeLabel('St. Louis Token v1.2')).toBe('St. Louis Token v1.2');

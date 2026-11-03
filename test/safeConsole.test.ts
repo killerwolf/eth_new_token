@@ -57,6 +57,14 @@ describe('makeSafeLogger', () => {
     expect(text).toContain('safeConsole.test.ts');
   });
 
+  it('never throws, even for hostile objects', () => {
+    const log = vi.fn();
+    const hostileProxy = new Proxy({}, { get: () => { throw new Error('trap'); }, getPrototypeOf: () => { throw new Error('trap'); } });
+    const hostileInspect = { [inspect.custom]: () => { throw new Error('inspect'); } };
+    expect(() => makeSafeLogger(log)(hostileProxy, hostileInspect, 'ok')).not.toThrow();
+    expect(log).toHaveBeenCalledWith('[unprintable]', '[unprintable]', 'ok');
+  });
+
   it('passes other values through untouched', () => {
     const log = vi.fn();
     const data = { a: 1 };

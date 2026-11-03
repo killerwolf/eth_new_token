@@ -12,7 +12,7 @@ export function sanitizeLabel(raw: string): string {
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
     .replace(/\bh(tt)(ps?:\/\/)/gi, 'hxx$2')
     // Bare domains ("evil.com", "www.evil.com") are auto-linked by Discord/Telegram too.
-    .replace(/([a-z0-9-])\.(?=[a-z]{2,})/gi, '$1[.]')
+    .replace(/([\p{L}\p{N}-])[.\u3002\uFF0E](?=\p{L}{2,})/gu, '$1[.]')
     .replace(/\s+/g, ' ')
     .trim();
   const chars = Array.from(cleaned);
