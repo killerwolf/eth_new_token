@@ -5,6 +5,7 @@ import {
   keccak256,
   numberToHex,
   pad,
+  stringToHex,
   toHex,
   type Address,
   type Hex,
@@ -25,6 +26,8 @@ export interface FakeToken {
   name: string;
   symbol: string;
   totalSupply: bigint;
+  /** Legacy token (MKR-style): name()/symbol() return bytes32 instead of string. */
+  legacyBytes32?: boolean;
 }
 
 export interface FakeLog {
@@ -134,6 +137,13 @@ export class FakeNode {
     }
   }
 
+  /** Kill every client connection (server stays up): simulates a provider/network blip. */
+  dropConnections(): void {
+    for (const socket of this.sockets) socket.terminate();
+    this.sockets.clear();
+    this.subscription = undefined;
+  }
+
   async close(): Promise<void> {
     for (const socket of this.sockets) socket.terminate();
     this.http.closeAllConnections();
@@ -179,6 +189,12 @@ export class FakeNode {
     }
   }
 
+  private text(token: FakeToken, value: string): Hex {
+    return token.legacyBytes32
+      ? stringToHex(value, { size: 32 })
+      : encodeAbiParameters([{ type: 'string' }], [value]);
+  }
+
   private call({ to, data, input }: { to: Address; data?: Hex; input?: Hex }): RpcOutcome {
     const calldata = data ?? input ?? '0x';
     const token = this.tokens.find((t) => t.address.toLowerCase() === to.toLowerCase());
@@ -189,9 +205,9 @@ export class FakeNode {
       case '0x18160ddd':
         return { result: encodeAbiParameters([{ type: 'uint256' }], [token.totalSupply]) };
       case '0x06fdde03':
-        return { result: encodeAbiParameters([{ type: 'string' }], [token.name]) };
+        return { result: this.text(token, token.name) };
       case '0x95d89b41':
-        return { result: encodeAbiParameters([{ type: 'string' }], [token.symbol]) };
+        return { result: this.text(token, token.symbol) };
       case '0x313ce567':
         return { result: numberToHex(18, { size: 32 }) };
       default:

@@ -13,6 +13,11 @@ describe('loadConfig', () => {
     expect(config.rpcUrl).toBe('http://a.example');
   });
 
+  it('falls back to the legacy name when ETH_RPC_URL is present but blank', () => {
+    expect(loadConfig(['Transfer'], { ETH_RPC_URL: '', ETH_WS_URL: WS }).rpcUrl).toBe(WS);
+    expect(loadConfig(['Transfer'], { ETH_RPC_URL: '   ', ETH_WS_URL: WS }).rpcUrl).toBe(WS);
+  });
+
   it('accepts HTTP(S) endpoints for polling mode', () => {
     const url = 'https://rpc.example.com/key';
     expect(loadConfig(['Transfer'], { ETH_RPC_URL: url }).rpcUrl).toBe(url);

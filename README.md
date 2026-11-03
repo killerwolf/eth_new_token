@@ -24,6 +24,7 @@ Every detection is followed by on-chain, API-free heuristics so you know what to
   `adjustableFees`, `txLimits`.
 - **Liquidity** — whether a Uniswap V2 pair or V3 pool (0.05 / 0.3 / 1%) against WETH exists yet.
 
+A probe that fails (flaky provider) is reported as `unknown`, never as a clean result.
 These are heuristics: a clean report is **not** a safety guarantee, and a flag is not proof of a rug.
 
 ## Setup
@@ -84,6 +85,19 @@ Flags: none detected
 Liquidity (vs WETH): none yet
 ```
 
+## Reliability and security notes
+
+- A transient RPC failure never hides a token: reads are retried (0.5 s, 1.5 s, 3 s), and if the
+  provider keeps failing the token is released so the next event retries it. Only a definitive
+  answer (revert, undecodable data, still no code) marks a token as "seen".
+- Token names and symbols are chosen by the deployer, so they are sanitised before display
+  (control/bidi characters stripped, URL schemes defanged, 64-character cap) and escaped per
+  medium (Discord markdown). Discord messages disable mentions and link previews.
+- RPC URLs, webhook URLs and bot tokens are redacted from every log line, including the ones
+  viem prints itself.
+- If the provider connection cannot be re-established the process exits with code 1, so a
+  supervisor (`Restart=on-failure`, Docker `restart: on-failure`) restarts it.
+
 ## Development
 
 ```bash
@@ -104,7 +118,10 @@ src/
   config.ts     argv/env validation
   watch.ts      viem event subscriptions (typed from the ABI)
   handlers.ts   pure detection logic, RPC injected → unit-tested
-  erc20.ts      totalSupply / name / symbol reads (string + legacy bytes32)
+  erc20.ts      totalSupply / name / symbol reads (string + legacy bytes32), with retry
+  errors.ts     error classification (transient / definitive) + URL-safe messages
+  text.ts       sanitising of attacker-controlled labels
+  safeConsole.ts  redacts URLs from third-party console output
   risk.ts       bytecode/owner/proxy/liquidity heuristics
   notify.ts     Discord + Telegram sinks
   report.ts     output formatting

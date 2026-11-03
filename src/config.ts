@@ -29,7 +29,7 @@ export function loadConfig(argv: readonly string[], env: NodeJS.ProcessEnv): Con
  * `ETH_WS_URL` is the previous name and still accepted.
  */
 function parseRpcUrl(env: NodeJS.ProcessEnv): string {
-  const raw = (env.ETH_RPC_URL ?? env.ETH_WS_URL)?.trim();
+  const raw = env.ETH_RPC_URL?.trim() || env.ETH_WS_URL?.trim();
   if (!raw) {
     const legacy = env.INFURA_PROJECT_ID
       ? ' INFURA_PROJECT_ID is no longer used: put the full URL in ETH_RPC_URL.'

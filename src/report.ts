@@ -14,10 +14,15 @@ export interface ReportExtras {
 }
 
 /** Human-readable detection report. */
-export function formatReport(token: TokenInfo, { holder, risk }: ReportExtras = {}): string {
+export function formatReport(
+  token: TokenInfo,
+  { holder, risk }: ReportExtras = {},
+  /** Escapes the (sanitised but still attacker-chosen) name/symbol for the target medium. */
+  escape: (label: string) => string = (label) => label,
+): string {
   const { address } = token;
   const lines = [
-    `New ERC-20 token detected: ${token.name} (${token.symbol})`,
+    `New ERC-20 token detected: ${escape(token.name)} (${escape(token.symbol)})`,
     `Contract address: ${address}`,
     `DexScreener: https://dexscreener.com/ethereum/${address}`,
     `EtherScan: https://etherscan.io/address/${address}`,

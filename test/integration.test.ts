@@ -17,7 +17,7 @@ import type { ReportExtras, TokenInfo } from '../src/report.js';
 import { readRisk } from '../src/risk.js';
 import { SeenSet } from '../src/seen.js';
 import { watchMints } from '../src/watch.js';
-import { FakeNode, TRANSFER_TOPIC } from './helpers/fakeNode.js';
+import { FakeNode, TRANSFER_TOPIC, type FakeToken } from './helpers/fakeNode.js';
 
 const TOKEN = '0x00000000000000000000000000000000000000aa' as Address;
 const HOLDER = '0x00000000000000000000000000000000000000bb' as Address;
@@ -35,9 +35,12 @@ afterEach(async () => {
 });
 
 /** Run Transfer mode against the fake node over the given transport and collect announcements. */
-async function scanMints(makeTransport: (node: FakeNode) => Transport) {
+async function scanMints(
+  makeTransport: (node: FakeNode) => Transport,
+  token: Partial<FakeToken> = {},
+) {
   node = await FakeNode.start([
-    { address: TOKEN, name: 'Pepe', symbol: 'PEPE', totalSupply: SUPPLY },
+    { address: TOKEN, name: 'Pepe', symbol: 'PEPE', totalSupply: SUPPLY, ...token },
   ]);
   const client = createPublicClient({
     chain: mainnet,
@@ -84,7 +87,11 @@ async function scanMints(makeTransport: (node: FakeNode) => Transport) {
   return announced;
 }
 
-function expectFreshPepe(announced: Awaited<ReturnType<typeof scanMints>>) {
+/** Give a (buggy) duplicate announcement time to show up before asserting there is only one. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+async function expectFreshPepe(announced: Awaited<ReturnType<typeof scanMints>>) {
+  await settle();
   expect(announced).toHaveLength(1);
   const [{ token, extras }] = announced as [(typeof announced)[number]];
   expect(token).toEqual({ address: getAddress(TOKEN), name: 'Pepe', symbol: 'PEPE' });
@@ -98,12 +105,52 @@ function expectFreshPepe(announced: Awaited<ReturnType<typeof scanMints>>) {
 
 describe('Transfer mode against a local fake JSON-RPC node', () => {
   it('works over WebSocket (push subscription)', async () => {
-    expectFreshPepe(
+    await expectFreshPepe(
       await scanMints((n) => webSocket(n.wsUrl, { reconnect: false, keepAlive: false })),
     );
   });
 
   it('works over HTTP (filter polling)', async () => {
-    expectFreshPepe(await scanMints((n) => http(n.httpUrl)));
+    await expectFreshPepe(await scanMints((n) => http(n.httpUrl)));
+  });
+
+  it('announces legacy bytes32-metadata tokens (MKR-style) end to end', async () => {
+    const announced = await scanMints((n) => http(n.httpUrl), {
+      legacyBytes32: true,
+      name: 'Maker',
+      symbol: 'MKR',
+    });
+    expect(announced[0]?.token).toMatchObject({ name: 'Maker', symbol: 'MKR' });
+  });
+
+  it('resubscribes by itself after the provider drops the WebSocket', async () => {
+    node = await FakeNode.start([{ address: TOKEN, name: 'Pepe', symbol: 'PEPE', totalSupply: SUPPLY }]);
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: webSocket(node.wsUrl, { reconnect: { attempts: 20, delay: 50 }, keepAlive: false }),
+    });
+    const announced: TokenInfo[] = [];
+    unwatch = watchMints(client, {
+      readTotalSupply: (a) => readTotalSupply(client, a),
+      readTokenInfo: (a) => readTokenInfo(client, a),
+      readRisk: async () => undefined,
+      announce: (token) => announced.push(token),
+      seen: new SeenSet(),
+    });
+
+    await node.subscribed();
+    node.dropConnections();
+    await Promise.race([
+      node.subscribed(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('never resubscribed')), 5000)),
+    ]);
+
+    node.emitLog({
+      address: TOKEN,
+      topics: [TRANSFER_TOPIC, topic(zeroAddress), topic(HOLDER)],
+      data: amount(SUPPLY),
+    });
+    for (let i = 0; i < 50 && announced.length === 0; i++) await settle();
+    expect(announced).toHaveLength(1);
   });
 });

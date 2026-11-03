@@ -4,6 +4,11 @@ export class SeenSet<T> {
 
   constructor(private readonly capacity = 10_000) {}
 
+  /** Forget `item` so a later event can retry it (used after a transient failure). */
+  delete(item: T): void {
+    this.items.delete(item);
+  }
+
   /** Adds `item`; returns `false` if it was already present. */
   add(item: T): boolean {
     if (this.items.has(item)) return false;

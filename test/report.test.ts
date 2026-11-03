@@ -19,11 +19,10 @@ describe('formatReport', () => {
   });
 });
 
-describe('describeError', () => {
-  it('handles Errors, event-like objects and primitives', async () => {
-    const { describeError } = await import('../src/watch.js');
-    expect(describeError(new Error('boom'))).toBe('boom');
-    expect(describeError({ type: 'error' })).toBe('error event');
-    expect(describeError('x')).toBe('x');
+describe('formatReport escaping', () => {
+  it('applies the medium-specific escape to name and symbol only', () => {
+    const report = formatReport({ ...token, name: 'a*b', symbol: 'c_d' }, {}, (label) => `<${label}>`);
+    expect(report).toContain('detected: <a*b> (<c_d>)');
+    expect(report).toContain(`https://etherscan.io/address/${address}`);
   });
 });
