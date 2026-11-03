@@ -104,6 +104,20 @@ Liquidity (vs WETH): none yet
 | TokenSniffer `/token/eth/<token>` | Unverified (same) |
 | GeckoTerminal | Pages are addressed by **pool**, so the link is only shown once a Uniswap pool exists (`/eth/pools/<pool>`). A factory returns a pool address as soon as it is created, even with no liquidity, so the page can still be empty or not yet indexed |
 
+## Troubleshooting
+
+**`Subscription error: error event` then the process exits.** The WebSocket could not be opened.
+Node 22+ ships a built-in WebSocket client that reports a failed handshake as an empty event, so the
+scanner then asks the HTTPS twin of your endpoint what is wrong and prints the answer, e.g.
+`401: invalid project id` (key invalid, revoked or restricted) or "the key is fine, the WebSocket is
+refused" (wrong path, firewall/VPN, allowlist). Quick manual check of a key:
+
+```bash
+curl -s -X POST -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+  "https://mainnet.infura.io/v3/<your-key>"
+```
+
 ## Reliability and security notes
 
 - A transient RPC failure never hides a token: reads are retried (0.5 s, 1.5 s, 3 s), and if the
@@ -127,7 +141,7 @@ npm run typecheck
 npm test
 ```
 
-CI runs typecheck, tests and build on Node 20 and 22. The test suite includes an integration test
+CI runs typecheck, tests and build on Node 20, 22 and 24. The test suite includes an integration test
 that runs both the WebSocket and the HTTP-polling paths of viem against an in-process fake JSON-RPC
 node (`test/helpers/fakeNode.ts`), so no network or API key is needed. It proves the client wiring,
 not behaviour on the live network.
