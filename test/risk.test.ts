@@ -50,7 +50,7 @@ describe('formatRisk', () => {
     owner: { kind: 'renounced' },
     proxy: undefined,
     capabilities: ['mintable'],
-    liquidity: { v2: true, v3Fees: [3000], complete: true },
+    liquidity: { v2: true, v3Fees: [3000], pools: [], complete: true },
   };
 
   it('renders every signal', () => {
@@ -64,7 +64,7 @@ describe('formatRisk', () => {
   });
 
   it('says "none yet" only when every pool lookup succeeded', () => {
-    const none = { v2: false, v3Fees: [], complete: true };
+    const none = { v2: false, v3Fees: [], pools: [], complete: true };
     expect(formatRisk({ ...base, liquidity: none }).at(-1)).toBe('Liquidity (vs WETH): none yet');
   });
 
@@ -74,7 +74,7 @@ describe('formatRisk', () => {
       owner: { kind: 'unknown' },
       proxy: 'unknown',
       capabilities: undefined,
-      liquidity: { v2: false, v3Fees: [], complete: false },
+      liquidity: { v2: false, v3Fees: [], pools: [], complete: false },
     });
     expect(lines).toEqual([
       'Decimals: unknown',
@@ -86,7 +86,7 @@ describe('formatRisk', () => {
   });
 
   it('flags partial liquidity results', () => {
-    const lines = formatRisk({ ...base, liquidity: { v2: true, v3Fees: [], complete: false } });
+    const lines = formatRisk({ ...base, liquidity: { v2: true, v3Fees: [], pools: [], complete: false } });
     expect(lines.at(-1)).toBe('Liquidity (vs WETH): Uniswap V2 (some lookups failed)');
   });
 });
@@ -120,7 +120,7 @@ describe('readRisk with a flaky provider', () => {
       owner: { kind: 'none' },
       proxy: undefined,
       capabilities: [],
-      liquidity: { v2: false, v3Fees: [], complete: true },
+      liquidity: { v2: false, v3Fees: [], pools: [], complete: true },
     });
   });
 
@@ -136,7 +136,7 @@ describe('readRisk with a flaky provider', () => {
       }),
       TOKEN,
     );
-    expect(risk?.liquidity).toEqual({ v2: false, v3Fees: [], complete: false });
+    expect(risk?.liquidity).toEqual({ v2: false, v3Fees: [], pools: [], complete: false });
   });
 
   it('keeps pools it did find when other lookups fail', async () => {
@@ -152,7 +152,25 @@ describe('readRisk with a flaky provider', () => {
       }),
       TOKEN,
     );
-    expect(risk?.liquidity).toEqual({ v2: true, v3Fees: [], complete: false });
+    expect(risk?.liquidity).toEqual({ v2: true, v3Fees: [], pools: [pool], complete: false });
+  });
+
+  it('collects the addresses of the pools it finds (V2 pair first, then V3)', async () => {
+    const v2 = '0x00000000000000000000000000000000000000d2' as Address;
+    const v3 = '0x00000000000000000000000000000000000000d3' as Address;
+    const risk = await readRisk(
+      clientWith({
+        readContract: async (fn) => {
+          if (fn === 'getPair') return v2;
+          if (fn === 'getPool') return v3; // answered for each fee tier
+          if (fn === 'decimals') return 18;
+          throw named('ContractFunctionRevertedError');
+        },
+      }),
+      TOKEN,
+    );
+    expect(risk?.liquidity.pools).toEqual([v2, v3, v3, v3]);
+    expect(risk?.liquidity.v3Fees).toEqual([500, 3000, 10000]);
   });
 
   it('distinguishes "no owner()" (revert) from "could not ask" (provider error)', async () => {

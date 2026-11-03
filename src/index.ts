@@ -9,7 +9,7 @@ import { scheduleLater, type Deps } from './handlers.js';
 import { formatReport } from './report.js';
 import { installSafeConsole } from './safeConsole.js';
 import { SeenSet } from './seen.js';
-import { describeError, formatErrorForLog } from './errors.js';
+import { addSecret, addSecretsFromUrl, describeError, formatErrorForLog } from './errors.js';
 import { watchContractCreated, watchMints } from './watch.js';
 
 /** Mainnet blocks take ~12s; polling every 6s keeps latency low without burning provider quota. */
@@ -25,6 +25,9 @@ function createTransport(url: string): Transport {
 
 function main(): void {
   const config = loadConfig(process.argv.slice(2), process.env);
+  addSecretsFromUrl(config.rpcUrl);
+  addSecretsFromUrl(process.env.DISCORD_WEBHOOK_URL);
+  addSecret(process.env.TELEGRAM_BOT_TOKEN?.trim());
 
   const client = createPublicClient({
     chain: mainnet,

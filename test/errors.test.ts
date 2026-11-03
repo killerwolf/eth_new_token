@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createServer } from 'node:net';
 import {
   createPublicClient,
   custom,
@@ -8,7 +9,14 @@ import {
   stringToHex,
 } from 'viem';
 import { mainnet } from 'viem/chains';
-import { classifyRpcError, describeError, formatErrorForLog, redactUrls } from '../src/errors.js';
+import {
+  addSecret,
+  addSecretsFromUrl,
+  classifyRpcError,
+  describeError,
+  formatErrorForLog,
+  redactUrls,
+} from '../src/errors.js';
 
 const SECRET = 'SECRETKEY123';
 
@@ -110,5 +118,60 @@ describe('formatErrorForLog', () => {
 
   it('keeps provider errors to one safe line', () => {
     expect(formatErrorForLog('plain')).toBe('plain');
+  });
+});
+
+describe('provider reasons stay visible, secrets do not', () => {
+  it("includes the provider's own explanation so a misbehaving endpoint is diagnosable", async () => {
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: custom({
+        request: async () => {
+          throw Object.assign(new Error('Please specify an address in your request'), { code: -32701, name: 'RpcRequestError' });
+        },
+      }),
+    });
+    const error = await client.getBlockNumber().catch((e: unknown) => e);
+    expect(describeError(error)).toContain('Please specify an address in your request');
+  });
+
+  it('reports the network error code when the host is unreachable', async () => {
+    // A port that was free a moment ago and has nothing listening: a genuine connection refusal.
+    const port = await new Promise<number>((resolve) => {
+      const server = createServer().listen(0, '127.0.0.1', () => {
+        const { port } = server.address() as { port: number };
+        server.close(() => resolve(port));
+      });
+    });
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: http(`http://127.0.0.1:${port}`, { retryCount: 0 }),
+    });
+    const error = await client.getBlockNumber().catch((e: unknown) => e);
+    expect(describeError(error)).toMatch(/\[(ECONNREFUSED|ENOTFOUND|EAI_AGAIN)\]/);
+  });
+
+  it('redacts registered secrets even when no URL surrounds them', async () => {
+    addSecretsFromUrl('https://rpc.example.com/v3/aaaa1111bbbb2222?apikey=qqqq9999rrrr8888');
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: custom({
+        request: async () => {
+          throw Object.assign(new Error('invalid key aaaa1111bbbb2222 / qqqq9999rrrr8888'), { code: -32000, name: 'RpcRequestError' });
+        },
+      }),
+    });
+    const error = await client.getBlockNumber().catch((e: unknown) => e);
+    const text = describeError(error);
+    expect(text).not.toContain('aaaa1111bbbb2222');
+    expect(text).not.toContain('qqqq9999rrrr8888');
+    expect(text).toContain('<redacted>');
+  });
+
+  it('ignores short values and survives regex metacharacters', () => {
+    addSecret('abc'); // too short: would redact ordinary text
+    addSecret('s3cr.t+key(1)*');
+    expect(redactUrls('abc stays')).toBe('abc stays');
+    expect(redactUrls('leak s3cr.t+key(1)* here')).toBe('leak <redacted> here');
   });
 });

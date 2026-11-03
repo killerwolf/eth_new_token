@@ -27,8 +27,10 @@ export function formatReport(
     `DexScreener: https://dexscreener.com/ethereum/${address}`,
     `EtherScan: https://etherscan.io/address/${address}`,
     `TokenSniffer: https://tokensniffer.com/token/eth/${address}`,
-    `GeckoTerminal: https://www.geckoterminal.com/eth/pools/${address}`,
   ];
+  // GeckoTerminal pages are addressed by *pool*, not by token: only link a pool that exists.
+  const pool = risk?.liquidity.pools[0];
+  if (pool) lines.push(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`);
   if (holder) lines.push(`Holder: https://debank.com/profile/${holder}`);
   if (risk) lines.push('', ...formatRisk(risk));
   return lines.join('\n');

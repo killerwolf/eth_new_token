@@ -71,6 +71,8 @@ export interface RiskReport {
   liquidity: {
     v2: boolean;
     v3Fees: number[];
+    /** Addresses of the pools found (V2 pair first, then V3 pools), for pool-addressed links. */
+    pools: Address[];
     /** false when at least one pool lookup failed, so the pools above may be incomplete. */
     complete: boolean;
   };
@@ -156,10 +158,17 @@ async function readLiquidity(client: PublicClient, token: Address): Promise<Risk
       ),
     ),
   ]);
-  const exists = (result: Probe<Address>): boolean => result.ok && result.value !== zeroAddress;
+  const found = (result: Probe<Address>): Address | undefined =>
+    result.ok && result.value !== zeroAddress ? result.value : undefined;
+  const v3Found = V3_FEES.flatMap((fee, i) => {
+    const pool = found(pools[i] as Probe<Address>);
+    return pool ? [{ fee, pool }] : [];
+  });
+  const v2Pair = found(pair);
   return {
-    v2: exists(pair),
-    v3Fees: V3_FEES.filter((_, i) => exists(pools[i] as Probe<Address>)),
+    v2: v2Pair !== undefined,
+    v3Fees: v3Found.map(({ fee }) => fee),
+    pools: [...(v2Pair ? [v2Pair] : []), ...v3Found.map(({ pool }) => pool)],
     complete: [pair, ...pools].every((result) => result.ok),
   };
 }

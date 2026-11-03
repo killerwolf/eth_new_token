@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Address } from 'viem';
 import { formatReport } from '../src/report.js';
+import type { RiskReport } from '../src/risk.js';
 
 const address = '0x00000000000000000000000000000000000000aa' as Address;
 const token = { address, name: 'Pepe', symbol: 'PEPE' };
@@ -16,6 +17,29 @@ describe('formatReport', () => {
   it('adds the holder link when known', () => {
     const holder = '0x00000000000000000000000000000000000000bb' as Address;
     expect(formatReport(token, { holder })).toContain(`https://debank.com/profile/${holder}`);
+  });
+});
+
+describe('GeckoTerminal link', () => {
+  const risk = (pools: Address[]): RiskReport => ({
+    decimals: 18,
+    owner: { kind: 'renounced' },
+    proxy: undefined,
+    capabilities: [],
+    liquidity: { v2: pools.length > 0, v3Fees: [], pools, complete: true },
+  });
+  const pool = '0x00000000000000000000000000000000000000d2' as Address;
+
+  it('is pool-addressed, and only shown once a pool exists', () => {
+    expect(formatReport(token)).not.toContain('GeckoTerminal');
+    expect(formatReport(token, { risk: risk([]) })).not.toContain('GeckoTerminal');
+    expect(formatReport(token, { risk: risk([pool]) })).toContain(
+      `GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`,
+    );
+  });
+
+  it('never uses the token address as a pool address', () => {
+    expect(formatReport(token, { risk: risk([pool]) })).not.toContain(`pools/${address}`);
   });
 });
 
