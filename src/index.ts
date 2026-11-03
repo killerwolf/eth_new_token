@@ -3,10 +3,12 @@ import { createPublicClient, webSocket } from 'viem';
 import { mainnet } from 'viem/chains';
 import { ConfigError, loadConfig } from './config.js';
 import { readTokenInfo, readTotalSupply } from './erc20.js';
+import { createNotifiers, NotifierConfigError } from './notify.js';
+import { readRisk } from './risk.js';
 import type { Deps } from './handlers.js';
 import { formatReport } from './report.js';
 import { SeenSet } from './seen.js';
-import { watchContractCreated, watchMints } from './watch.js';
+import { describeError, watchContractCreated, watchMints } from './watch.js';
 
 function main(): void {
   const config = loadConfig(process.argv.slice(2), process.env);
@@ -19,16 +21,28 @@ function main(): void {
     }),
   });
 
+  const notifiers = createNotifiers(process.env);
+
   const deps: Deps = {
     readTotalSupply: (address) => readTotalSupply(client, address),
     readTokenInfo: (address) => readTokenInfo(client, address),
-    announce: (token, holder) => console.log(`${formatReport(token, holder)}\n`),
+    readRisk: (address) => readRisk(client, address),
+    announce: (token, extras) => {
+      const report = formatReport(token, extras);
+      console.log(`${report}\n`);
+      for (const notifier of notifiers) {
+        notifier.send(report).catch((error: unknown) => {
+          console.error(`Notify (${notifier.name}) failed: ${describeError(error)}`);
+        });
+      }
+    },
     seen: new SeenSet(),
   };
 
   const unwatch =
     config.mode === 'ContractCreated' ? watchContractCreated(client, deps) : watchMints(client, deps);
-  console.error(`Watching Ethereum mainnet (${config.mode})… Ctrl+C to stop.`);
+  const sinks = ['console', ...notifiers.map((n) => n.name)].join(', ');
+  console.error(`Watching Ethereum mainnet (${config.mode}) → ${sinks}. Ctrl+C to stop.`);
 
   const shutdown = () => {
     unwatch();
@@ -41,7 +55,7 @@ function main(): void {
 try {
   main();
 } catch (error) {
-  if (error instanceof ConfigError) {
+  if (error instanceof ConfigError || error instanceof NotifierConfigError) {
     console.error(error.message);
     process.exit(1);
   }

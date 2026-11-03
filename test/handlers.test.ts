@@ -10,6 +10,7 @@ const info = { address: TOKEN, name: 'Pepe', symbol: 'PEPE' };
 const makeDeps = (overrides: Partial<Deps> = {}): Deps => ({
   readTotalSupply: vi.fn().mockResolvedValue(1000n),
   readTokenInfo: vi.fn().mockResolvedValue(info),
+  readRisk: vi.fn().mockResolvedValue(undefined),
   announce: vi.fn(),
   seen: new SeenSet(),
   ...overrides,
@@ -19,7 +20,7 @@ describe('onMint', () => {
   it('announces when the first mint equals total supply', async () => {
     const deps = makeDeps();
     await onMint(deps, { token: TOKEN, to: HOLDER, value: 1000n });
-    expect(deps.announce).toHaveBeenCalledWith(info, HOLDER);
+    expect(deps.announce).toHaveBeenCalledWith(info, { holder: HOLDER, risk: undefined });
   });
 
   it('ignores partial mints and zero-value transfers without touching the RPC', async () => {
@@ -48,7 +49,7 @@ describe('onContractCreated', () => {
   it('announces contracts that answer totalSupply()', async () => {
     const deps = makeDeps();
     await onContractCreated(deps, TOKEN);
-    expect(deps.announce).toHaveBeenCalledWith(info);
+    expect(deps.announce).toHaveBeenCalledWith(info, { risk: undefined });
   });
 
   it('stays quiet for non-token contracts', async () => {

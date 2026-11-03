@@ -1,11 +1,14 @@
 import { getAddress, type Address } from 'viem';
-import type { TokenInfo } from './report.js';
+import type { ReportExtras, TokenInfo } from './report.js';
+import type { RiskReport } from './risk.js';
 import { SeenSet } from './seen.js';
 
 export interface Deps {
   readTotalSupply(address: Address): Promise<bigint | undefined>;
   readTokenInfo(address: Address): Promise<TokenInfo | undefined>;
-  announce(token: TokenInfo, holder?: Address): void;
+  /** Best-effort risk probe; must not throw. */
+  readRisk(address: Address): Promise<RiskReport | undefined>;
+  announce(token: TokenInfo, extras: ReportExtras): void;
   seen: SeenSet<Address>;
 }
 
@@ -16,7 +19,8 @@ export async function onContractCreated(deps: Deps, created: Address): Promise<v
   if ((await deps.readTotalSupply(address)) === undefined) return;
 
   const token = await deps.readTokenInfo(address);
-  if (token) deps.announce(token);
+  if (!token) return;
+  deps.announce(token, { risk: await deps.readRisk(address) });
 }
 
 /**
@@ -35,5 +39,6 @@ export async function onMint(
   if (totalSupply !== mint.value) return;
 
   const token = await deps.readTokenInfo(address);
-  if (token) deps.announce(token, mint.to);
+  if (!token) return;
+  deps.announce(token, { holder: mint.to, risk: await deps.readRisk(address) });
 }

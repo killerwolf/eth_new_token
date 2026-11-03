@@ -15,7 +15,7 @@ describe('formatReport', () => {
 
   it('adds the holder link when known', () => {
     const holder = '0x00000000000000000000000000000000000000bb' as Address;
-    expect(formatReport(token, holder)).toContain(`https://debank.com/profile/${holder}`);
+    expect(formatReport(token, { holder })).toContain(`https://debank.com/profile/${holder}`);
   });
 });
 

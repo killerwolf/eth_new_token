@@ -1,4 +1,5 @@
 import type { Address } from 'viem';
+import { formatRisk, type RiskReport } from './risk.js';
 
 export interface TokenInfo {
   address: Address;
@@ -6,8 +7,14 @@ export interface TokenInfo {
   symbol: string;
 }
 
-/** Human-readable detection report. `holder` is the initial recipient (Transfer mode only). */
-export function formatReport(token: TokenInfo, holder?: Address): string {
+export interface ReportExtras {
+  /** Initial recipient of the mint (Transfer mode only). */
+  holder?: Address | undefined;
+  risk?: RiskReport | undefined;
+}
+
+/** Human-readable detection report. */
+export function formatReport(token: TokenInfo, { holder, risk }: ReportExtras = {}): string {
   const { address } = token;
   const lines = [
     `New ERC-20 token detected: ${token.name} (${token.symbol})`,
@@ -18,5 +25,6 @@ export function formatReport(token: TokenInfo, holder?: Address): string {
     `GeckoTerminal: https://www.geckoterminal.com/eth/pools/${address}`,
   ];
   if (holder) lines.push(`Holder: https://debank.com/profile/${holder}`);
+  if (risk) lines.push('', ...formatRisk(risk));
   return lines.join('\n');
 }
