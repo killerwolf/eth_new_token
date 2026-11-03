@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Address } from 'viem';
-import { formatReport } from '../src/report.js';
+import { formatLiquidityUpdate, formatReport } from '../src/report.js';
 import type { RiskReport } from '../src/risk.js';
 
 const address = '0x00000000000000000000000000000000000000aa' as Address;
@@ -48,5 +48,30 @@ describe('formatReport escaping', () => {
     const report = formatReport({ ...token, name: 'a*b', symbol: 'c_d' }, {}, (label) => `<${label}>`);
     expect(report).toContain('detected: <a*b> (<c_d>)');
     expect(report).toContain(`https://etherscan.io/address/${address}`);
+  });
+});
+
+describe('formatLiquidityUpdate', () => {
+  const pool = '0x00000000000000000000000000000000000000d2' as Address;
+  const risk: RiskReport = {
+    decimals: 18,
+    owner: { kind: 'renounced' },
+    proxy: undefined,
+    capabilities: ['mintable'],
+    liquidity: { v2: true, v3Fees: [], pools: [pool], complete: true },
+  };
+
+  it('announces the liquidity, links the pool and repeats the risk lines', () => {
+    const text = formatLiquidityUpdate(token, risk);
+    expect(text).toContain('Liquidity added: Pepe (PEPE)');
+    expect(text).toContain(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`);
+    expect(text).toContain('Liquidity (vs WETH): Uniswap V2');
+    expect(text).toContain('Owner: renounced');
+    expect(text).toContain('Flags: mintable');
+  });
+
+  it('applies the medium-specific escape to the name and symbol', () => {
+    const text = formatLiquidityUpdate({ ...token, name: 'a*b' }, risk, (label) => `<${label}>`);
+    expect(text).toContain('Liquidity added: <a*b> (<PEPE>)');
   });
 });

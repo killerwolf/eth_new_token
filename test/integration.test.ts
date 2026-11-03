@@ -12,7 +12,7 @@ import {
 } from 'viem';
 import { mainnet } from 'viem/chains';
 import { readTokenInfo, readTotalSupply } from '../src/erc20.js';
-import type { Deps } from '../src/handlers.js';
+import { FollowUpBudget, type Deps } from '../src/handlers.js';
 import type { ReportExtras, TokenInfo } from '../src/report.js';
 import { readRisk } from '../src/risk.js';
 import { SeenSet } from '../src/seen.js';
@@ -58,6 +58,8 @@ async function scanMints(
         announced.push({ token, extras });
         resolve();
       },
+      announceUpdate: () => undefined,
+      followUps: new FollowUpBudget(10),
       schedule: () => undefined,
       reportError: () => undefined,
       seen: new SeenSet(),
@@ -137,6 +139,8 @@ describe('Transfer mode against a local fake JSON-RPC node', () => {
       readTokenInfo: (a) => readTokenInfo(client, a),
       readRisk: async () => undefined,
       announce: (token) => announced.push(token),
+      announceUpdate: () => undefined,
+      followUps: new FollowUpBudget(10),
       schedule: () => undefined,
       reportError: () => undefined,
       seen: new SeenSet(),

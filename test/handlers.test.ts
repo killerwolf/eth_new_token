@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Address } from 'viem';
-import { onContractCreated, onMint, RETRY_DELAYS_MS, type Deps } from '../src/handlers.js';
+import {
+  FollowUpBudget,
+  LIQUIDITY_RECHECK_DELAYS_MS,
+  onContractCreated,
+  onMint,
+  RETRY_DELAYS_MS,
+  type Deps,
+} from '../src/handlers.js';
+import type { RiskReport } from '../src/risk.js';
 import { SeenSet } from '../src/seen.js';
 
 const TOKEN = '0x00000000000000000000000000000000000000aa' as Address;
@@ -16,6 +24,8 @@ const makeDeps = (overrides: Partial<Deps> = {}): Deps & { due: Array<() => void
       due.push(task);
     },
     reportError: vi.fn(),
+    announceUpdate: vi.fn(),
+    followUps: new FollowUpBudget(),
     ...baseDeps(),
     ...overrides,
   };
@@ -149,5 +159,100 @@ describe('onContractCreated', () => {
     await onContractCreated(deps, TOKEN);
     expect(deps.readTokenInfo).not.toHaveBeenCalled();
     expect(deps.announce).not.toHaveBeenCalled();
+  });
+});
+
+describe('liquidity follow-up', () => {
+  const liquidity = (pools: string[]): RiskReport => ({
+    decimals: 18,
+    owner: { kind: 'renounced' },
+    proxy: undefined,
+    capabilities: [],
+    liquidity: { v2: pools.length > 0, v3Fees: [], pools: pools as never, complete: true },
+  });
+  const POOL = '0x00000000000000000000000000000000000000d2';
+  const mint = { token: TOKEN, to: HOLDER, value: 1000n };
+
+  /** Run the next scheduled task and let its async work finish. */
+  const tick = async (deps: ReturnType<typeof makeDeps>) => {
+    deps.due.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  it('sends an update, once, when a pool shows up later, then stops following', async () => {
+    const readRisk = vi
+      .fn()
+      .mockResolvedValueOnce(liquidity([])) // at announce time: no pool yet
+      .mockResolvedValueOnce(liquidity([])) // first re-check: still none
+      .mockResolvedValue(liquidity([POOL])); // second re-check: pool exists
+    const deps = makeDeps({ readRisk });
+    await onMint(deps, mint);
+    expect(deps.announce).toHaveBeenCalledTimes(1);
+    expect(deps.due).toHaveLength(1);
+
+    await tick(deps); // still no pool -> schedules the next check
+    expect(deps.announceUpdate).not.toHaveBeenCalled();
+    expect(deps.due).toHaveLength(1);
+
+    await tick(deps); // pool found
+    expect(deps.announceUpdate).toHaveBeenCalledTimes(1);
+    expect(deps.announceUpdate).toHaveBeenCalledWith(info, liquidity([POOL]));
+    expect(deps.due).toHaveLength(0);
+  });
+
+  it('gives up quietly after the last re-check', async () => {
+    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])) });
+    await onMint(deps, mint);
+    for (let i = 0; i < LIQUIDITY_RECHECK_DELAYS_MS.length; i++) await tick(deps);
+    expect(deps.announceUpdate).not.toHaveBeenCalled();
+    expect(deps.due).toHaveLength(0);
+    expect(deps.reportError).not.toHaveBeenCalled();
+  });
+
+  it('does not follow a token that already has a pool at announce time', async () => {
+    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([POOL])) });
+    await onMint(deps, mint);
+    expect(deps.announce).toHaveBeenCalledTimes(1);
+    expect(deps.due).toHaveLength(0);
+  });
+
+  it('keeps following after a failed re-check, and reports the failure', async () => {
+    const readRisk = vi
+      .fn()
+      .mockResolvedValueOnce(liquidity([]))
+      .mockRejectedValueOnce(new Error('blip'))
+      .mockResolvedValue(liquidity([POOL]));
+    const deps = makeDeps({ readRisk });
+    await onMint(deps, mint);
+    await tick(deps);
+    expect(deps.reportError).toHaveBeenCalledTimes(1);
+    expect(deps.due).toHaveLength(1);
+    await tick(deps);
+    expect(deps.announceUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('is bounded: no follow-up is scheduled once the budget is spent', async () => {
+    const deps = makeDeps({
+      readRisk: vi.fn().mockResolvedValue(liquidity([])),
+      followUps: new FollowUpBudget(1),
+    });
+    await onMint(deps, mint);
+    await onMint(deps, { ...mint, token: '0x00000000000000000000000000000000000000ab' as Address });
+    expect(deps.announce).toHaveBeenCalledTimes(2);
+    expect(deps.due).toHaveLength(1); // only the first token is followed
+  });
+
+  it('frees its slot when it finishes, so later tokens can be followed', async () => {
+    const budget = new FollowUpBudget(1);
+    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])), followUps: budget });
+    await onMint(deps, mint);
+    for (let i = 0; i < LIQUIDITY_RECHECK_DELAYS_MS.length; i++) await tick(deps);
+    expect(budget.tryAcquire()).toBe(true);
+  });
+
+  it('follows tokens found through ContractCreated too', async () => {
+    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])) });
+    await onContractCreated(deps, TOKEN);
+    expect(deps.due).toHaveLength(1);
   });
 });
