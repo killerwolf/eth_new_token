@@ -174,7 +174,7 @@ describe('liquidity follow-up', () => {
       v2: state !== 'none',
       v3Fees: [],
       pools: state === 'none' ? [] : [POOL],
-      details: state === 'none' ? [] : [{ label: 'Uniswap V2', pool: POOL, weth: state === 'funded' ? 10n ** 18n : 0n }],
+      details: state === 'none' ? [] : [{ label: 'Uniswap V2', pool: POOL, kind: 'v2' as const, weth: state === 'funded' ? 10n ** 18n : 0n }],
       funded: state === 'funded',
       complete: true,
     },
@@ -262,6 +262,46 @@ describe('liquidity follow-up', () => {
     expect(announceUpdate).toHaveBeenCalledTimes(1);
     expect(deps.reportError).toHaveBeenCalledTimes(1);
     expect(deps.due).toHaveLength(0); // no retry that would announce twice
+  });
+
+  it('a scheduler that throws mid-chain is reported, frees the slot once, and never rejects unhandled', async () => {
+    const budget = new FollowUpBudget(1);
+    let calls = 0;
+    const deps = makeDeps({
+      readRisk: states('none'),
+      followUps: budget,
+      schedule: (task) => {
+        if (calls++ === 0) deps.due.push(task);
+        else throw new Error('scheduler down');
+      },
+    });
+    await onMint(deps, mint);
+    await tick(deps); // runs the first re-check, whose follow-on scheduling throws
+    expect(deps.reportError).toHaveBeenCalledTimes(1);
+    expect(budget.tryAcquire()).toBe(true); // slot freed...
+    expect(budget.tryAcquire()).toBe(false); // ...exactly once (limit 1)
+  });
+
+  it('one token can never free another token\'s slot by releasing twice', async () => {
+    const budget = new FollowUpBudget(2);
+    const deps = makeDeps({
+      readRisk: states('none', 'none', 'funded'), // A announced, B announced, then A funded
+      followUps: budget,
+      announceUpdate: vi.fn(() => {
+        throw new Error('sink down');
+      }),
+      reportError: vi.fn(() => {
+        throw new Error('logger down'); // makes the chain reject after release() already ran
+      }),
+    });
+    const B = '0x00000000000000000000000000000000000000ab' as Address;
+    await onMint(deps, mint);
+    await onMint(deps, { ...mint, token: B });
+    await tick(deps); // A is funded: update fails, error report fails, chain rejects
+
+    // A held ONE slot of two. B still holds the other, so exactly one slot is free.
+    expect(budget.tryAcquire()).toBe(true);
+    expect(budget.tryAcquire()).toBe(false);
   });
 
   it('is bounded: no follow-up is scheduled once the budget is spent', async () => {

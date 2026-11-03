@@ -22,7 +22,7 @@ Every detection is followed by on-chain, API-free heuristics so you know what to
 - **Proxy** — EIP-1967 or EIP-1167 clone (the *implementation's* bytecode is then scanned).
 - **Flags** — known selectors found in bytecode: `mintable`, `blacklist`, `pausable`, `tradingToggle`,
   `adjustableFees`, `txLimits`.
-- **Liquidity** — the Uniswap V2 pair / V3 pools (0.05 / 0.3 / 1%) against WETH and the WETH each one holds. A pool that merely *exists* is not liquidity (many tokens create their pair in the constructor): it counts as funded from 0.01 WETH, and the report shows `created, empty` or `dust` otherwise.
+- **Liquidity** — the Uniswap V2 pair / V3 pools (0.05 / 0.3 / 1%) against WETH and the WETH each one holds. A pool that merely *exists* is not liquidity (many tokens create their pair in the constructor): it counts as funded from 0.01 WETH of real backing: the WETH *reserve* of a V2 pair (a WETH donation to the pair is not a reserve) or, for V3, WETH held by a pool that also has active liquidity. Otherwise the report shows `created, empty`, `dust` or `no active liquidity`. Limitations: pairs quoted in USDC/USDT are not looked at, and a V3 position held entirely on the token side (no WETH) is reported as `no WETH, token-side positions possible`, never as funded.
 
 **Liquidity follow-up.** A brand-new token almost never has funded liquidity when it is detected
 (its pool usually does not exist yet, or exists empty), so its report says `none yet`. The scanner

@@ -31,7 +31,7 @@ describe('GeckoTerminal link', () => {
       v2: pools.length > 0,
       v3Fees: [],
       pools,
-      details: pools.map((p) => ({ label: 'Uniswap V2', pool: p, weth })),
+      details: pools.map((p) => ({ label: 'Uniswap V2', pool: p, kind: 'v2' as const, weth })),
       funded: weth !== undefined && weth >= MIN_FUNDED_WETH,
       complete: true,
     },
@@ -55,8 +55,8 @@ describe('GeckoTerminal link', () => {
     const big = '0x00000000000000000000000000000000000000b2' as Address;
     const r = risk(undefined, []);
     r.liquidity.details = [
-      { label: 'Uniswap V2', pool: small, weth: MIN_FUNDED_WETH },
-      { label: 'Uniswap V3 0.3%', pool: big, weth: MIN_FUNDED_WETH * 50n },
+      { label: 'Uniswap V2', pool: small, kind: 'v2', weth: MIN_FUNDED_WETH },
+      { label: 'Uniswap V3 0.3%', pool: big, kind: 'v3', weth: MIN_FUNDED_WETH * 50n, active: true },
     ];
     r.liquidity.funded = true;
     expect(formatReport(token, { risk: r })).toContain(`pools/${big}`);
@@ -82,7 +82,7 @@ describe('formatLiquidityUpdate', () => {
       v2: true,
       v3Fees: [],
       pools: [pool],
-      details: [{ label: 'Uniswap V2', pool, weth: MIN_FUNDED_WETH * 10n }],
+      details: [{ label: 'Uniswap V2', pool, kind: 'v2', weth: MIN_FUNDED_WETH * 10n }],
       funded: true,
       complete: true,
     },

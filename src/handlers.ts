@@ -56,10 +56,10 @@ export const scheduleLater = (task: () => void, delayMs: number): void => {
   setTimeout(task, delayMs).unref();
 };
 
-function followLiquidity(deps: Deps, token: TokenInfo, step = 0): void {
+function followLiquidity(deps: Deps, token: TokenInfo, release: () => void, step = 0): void {
   const delay = LIQUIDITY_RECHECK_DELAYS_MS[step];
   if (delay === undefined) {
-    deps.followUps.release();
+    release();
     return;
   }
   deps.schedule(() => {
@@ -67,7 +67,7 @@ function followLiquidity(deps: Deps, token: TokenInfo, step = 0): void {
       try {
         const risk = await deps.readRisk(token.address);
         if (risk?.liquidity.funded) {
-          deps.followUps.release(); // done either way: a failed announce is not retried (no duplicates)
+          release(); // done either way: a failed announce is not retried (no duplicates)
           try {
             deps.announceUpdate(token, risk);
           } catch (error) {
@@ -78,8 +78,11 @@ function followLiquidity(deps: Deps, token: TokenInfo, step = 0): void {
       } catch (error) {
         deps.reportError(error); // keep following: the next check may succeed
       }
-      followLiquidity(deps, token, step + 1);
-    })().catch(deps.reportError); // a scheduled task must never become an unhandled rejection
+      followLiquidity(deps, token, release, step + 1);
+    })().catch((error: unknown) => {
+      release(); // the chain is dead (e.g. the scheduler threw): do not keep the slot
+      deps.reportError(error);
+    }); // a scheduled task must never become an unhandled rejection
   }, delay);
 }
 
@@ -87,7 +90,20 @@ function followLiquidity(deps: Deps, token: TokenInfo, step = 0): void {
 function announceAndFollow(deps: Deps, token: TokenInfo, extras: ReportExtras): void {
   deps.announce(token, extras);
   if (extras.risk?.liquidity.funded) return; // already tradable (an empty pool is not)
-  if (deps.followUps.tryAcquire()) followLiquidity(deps, token);
+  if (!deps.followUps.tryAcquire()) return;
+  let released = false;
+  // Idempotent, so one token can never free another token's slot by releasing twice.
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    deps.followUps.release();
+  };
+  try {
+    followLiquidity(deps, token, release);
+  } catch (error) {
+    release();
+    deps.reportError(error);
+  }
 }
 
 async function attempt(
