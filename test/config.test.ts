@@ -4,7 +4,21 @@ import { ConfigError, loadConfig } from '../src/config.js';
 describe('loadConfig', () => {
   const WS = 'wss://eth-mainnet.example.com/v2/secret-key';
 
-  it('uses ETH_WS_URL as-is, so any provider works', () => {
+  it('still accepts the previous ETH_WS_URL name', () => {
+    expect(loadConfig(['Transfer'], { ETH_WS_URL: WS }).rpcUrl).toBe(WS);
+  });
+
+  it('prefers ETH_RPC_URL over the legacy name', () => {
+    const config = loadConfig(['Transfer'], { ETH_RPC_URL: 'http://a.example', ETH_WS_URL: WS });
+    expect(config.rpcUrl).toBe('http://a.example');
+  });
+
+  it('accepts HTTP(S) endpoints for polling mode', () => {
+    const url = 'https://rpc.example.com/key';
+    expect(loadConfig(['Transfer'], { ETH_RPC_URL: url }).rpcUrl).toBe(url);
+  });
+
+  it('uses ETH_RPC_URL as-is, so any provider works', () => {
     const config = loadConfig(['Transfer'], { ETH_RPC_URL: ` ${WS} ` });
     expect(config).toEqual({ mode: 'Transfer', rpcUrl: WS });
   });
@@ -18,7 +32,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig([], { ETH_RPC_URL: WS })).toThrow(/Invalid mode/);
   });
 
-  it('requires ETH_WS_URL and points legacy users at it', () => {
+  it('requires ETH_RPC_URL and points INFURA_PROJECT_ID users at it', () => {
     expect(() => loadConfig(['Transfer'], {})).toThrow(/ETH_RPC_URL is not set/);
     expect(() => loadConfig(['Transfer'], { INFURA_PROJECT_ID: 'abc' })).toThrow(/no longer used/);
   });
