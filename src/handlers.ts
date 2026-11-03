@@ -66,23 +66,27 @@ function followLiquidity(deps: Deps, token: TokenInfo, step = 0): void {
     void (async () => {
       try {
         const risk = await deps.readRisk(token.address);
-        if (risk && risk.liquidity.pools.length > 0) {
-          deps.announceUpdate(token, risk);
-          deps.followUps.release();
+        if (risk?.liquidity.funded) {
+          deps.followUps.release(); // done either way: a failed announce is not retried (no duplicates)
+          try {
+            deps.announceUpdate(token, risk);
+          } catch (error) {
+            deps.reportError(error);
+          }
           return;
         }
       } catch (error) {
         deps.reportError(error); // keep following: the next check may succeed
       }
       followLiquidity(deps, token, step + 1);
-    })();
+    })().catch(deps.reportError); // a scheduled task must never become an unhandled rejection
   }, delay);
 }
 
 /** Announce a token, then follow its liquidity if it had none yet. Never throws. */
 function announceAndFollow(deps: Deps, token: TokenInfo, extras: ReportExtras): void {
   deps.announce(token, extras);
-  if (extras.risk && extras.risk.liquidity.pools.length > 0) return; // already tradable
+  if (extras.risk?.liquidity.funded) return; // already tradable (an empty pool is not)
   if (deps.followUps.tryAcquire()) followLiquidity(deps, token);
 }
 

@@ -1,5 +1,7 @@
 import { classifyRpcError } from './errors.js';
 import {
+  erc20Abi,
+  formatEther,
   getAddress,
   parseAbi,
   toFunctionSelector,
@@ -51,6 +53,19 @@ const v3FactoryAbi = parseAbi([
   'function getPool(address, address, uint24) view returns (address)',
 ]);
 
+export interface PoolInfo {
+  label: string;
+  pool: Address;
+  weth: bigint | undefined;
+}
+
+/**
+ * A pool counts as funded from 0.01 WETH. Anyone can create a pool for any token (many tokens do
+ * it in their constructor) and anyone can send dust to it, so existence alone proves nothing.
+ * A heuristic threshold: the amounts are printed so readers can judge.
+ */
+export const MIN_FUNDED_WETH = 10n ** 16n;
+
 export type OwnerStatus =
   | { kind: 'none' }
   | { kind: 'renounced' }
@@ -71,8 +86,15 @@ export interface RiskReport {
   liquidity: {
     v2: boolean;
     v3Fees: number[];
-    /** Addresses of the pools found (V2 pair first, then V3 pools), for pool-addressed links. */
+    /**
+     * Pools that EXIST (V2 pair first, then V3). A factory returns an address as soon as the pool
+     * is created, before anyone has put a single token in it: see `funded`.
+     */
     pools: Address[];
+    /** Each existing pool with its WETH balance (`undefined` if that read failed). */
+    details: PoolInfo[];
+    /** At least one pool holds `MIN_FUNDED_WETH` or more: the token can actually be traded. */
+    funded: boolean;
     /** false when at least one pool lookup failed, so the pools above may be incomplete. */
     complete: boolean;
   };
@@ -137,6 +159,8 @@ async function resolveImplementation(
   return { proxy: undefined, implementation: undefined };
 }
 
+const FEE_LABEL: Record<number, string> = { 500: '0.05%', 3000: '0.3%', 10000: '1%' };
+
 async function readLiquidity(client: PublicClient, token: Address): Promise<RiskReport['liquidity']> {
   const [pair, ...pools] = await Promise.all([
     settle(
@@ -160,17 +184,42 @@ async function readLiquidity(client: PublicClient, token: Address): Promise<Risk
   ]);
   const found = (result: Probe<Address>): Address | undefined =>
     result.ok && result.value !== zeroAddress ? result.value : undefined;
-  const v3Found = V3_FEES.flatMap((fee, i) => {
-    const pool = found(pools[i] as Probe<Address>);
-    return pool ? [{ fee, pool }] : [];
+
+  const candidates = [
+    { label: 'Uniswap V2', pool: found(pair) },
+    ...V3_FEES.map((fee, i) => ({
+      label: `Uniswap V3 ${FEE_LABEL[fee] ?? fee}`,
+      pool: found(pools[i] as Probe<Address>),
+      fee,
+    })),
+  ].filter((c): c is typeof c & { pool: Address } => c.pool !== undefined);
+
+  // Existence is not liquidity: look at what the pool really holds.
+  const balances = await Promise.all(
+    candidates.map((c) =>
+      settle(client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [c.pool] })),
+    ),
+  );
+  const details: PoolInfo[] = candidates.map((c, i) => {
+    const balance = balances[i] as Probe<bigint>;
+    return { label: c.label, pool: c.pool, weth: balance.ok ? balance.value : undefined };
   });
-  const v2Pair = found(pair);
+
   return {
-    v2: v2Pair !== undefined,
-    v3Fees: v3Found.map(({ fee }) => fee),
-    pools: [...(v2Pair ? [v2Pair] : []), ...v3Found.map(({ pool }) => pool)],
-    complete: [pair, ...pools].every((result) => result.ok),
+    v2: found(pair) !== undefined,
+    v3Fees: candidates.flatMap((c) => ('fee' in c ? [c.fee] : [])),
+    pools: candidates.map((c) => c.pool),
+    details,
+    funded: details.some((d) => d.weth !== undefined && d.weth >= MIN_FUNDED_WETH),
+    complete: [pair, ...pools, ...balances].every((result) => result.ok),
   };
+}
+
+/** The funded pool holding the most WETH, if any. */
+export function bestFundedPool(liquidity: RiskReport['liquidity']): Address | undefined {
+  return liquidity.details
+    .filter((d) => d.weth !== undefined && d.weth >= MIN_FUNDED_WETH)
+    .sort((a, b) => Number((b.weth ?? 0n) - (a.weth ?? 0n)))[0]?.pool;
 }
 
 async function readOwner(client: PublicClient, address: Address): Promise<OwnerStatus> {
@@ -207,7 +256,6 @@ export async function readRisk(
   };
 }
 
-const FEE_LABEL: Record<number, string> = { 500: '0.05%', 3000: '0.3%', 10000: '1%' };
 
 export function formatRisk(risk: RiskReport): string[] {
   const owner = (() => {
@@ -223,10 +271,13 @@ export function formatRisk(risk: RiskReport): string[] {
     }
   })();
 
-  const pools = [
-    ...(risk.liquidity.v2 ? ['Uniswap V2'] : []),
-    ...risk.liquidity.v3Fees.map((fee) => `Uniswap V3 ${FEE_LABEL[fee] ?? fee}`),
-  ];
+  const amount = (weth: bigint | undefined): string => {
+    if (weth === undefined) return 'balance unknown';
+    if (weth === 0n) return 'created, empty';
+    if (weth < MIN_FUNDED_WETH) return `${formatEther(weth)} WETH, dust`;
+    return `${Number(formatEther(weth)).toFixed(2)} WETH`;
+  };
+  const pools = risk.liquidity.details.map((d) => `${d.label} (${amount(d.weth)})`);
   const liquidity = (() => {
     if (!risk.liquidity.complete) {
       return pools.length ? `${pools.join(', ')} (some lookups failed)` : 'unknown (RPC error)';

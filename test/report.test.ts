@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Address } from 'viem';
 import { formatLiquidityUpdate, formatReport } from '../src/report.js';
-import type { RiskReport } from '../src/risk.js';
+import { MIN_FUNDED_WETH, type RiskReport } from '../src/risk.js';
 
 const address = '0x00000000000000000000000000000000000000aa' as Address;
 const token = { address, name: 'Pepe', symbol: 'PEPE' };
@@ -21,25 +21,45 @@ describe('formatReport', () => {
 });
 
 describe('GeckoTerminal link', () => {
-  const risk = (pools: Address[]): RiskReport => ({
+  const pool = '0x00000000000000000000000000000000000000d2' as Address;
+  const risk = (weth: bigint | undefined, pools: Address[] = [pool]): RiskReport => ({
     decimals: 18,
     owner: { kind: 'renounced' },
     proxy: undefined,
     capabilities: [],
-    liquidity: { v2: pools.length > 0, v3Fees: [], pools, complete: true },
+    liquidity: {
+      v2: pools.length > 0,
+      v3Fees: [],
+      pools,
+      details: pools.map((p) => ({ label: 'Uniswap V2', pool: p, weth })),
+      funded: weth !== undefined && weth >= MIN_FUNDED_WETH,
+      complete: true,
+    },
   });
-  const pool = '0x00000000000000000000000000000000000000d2' as Address;
 
-  it('is pool-addressed, and only shown once a pool exists', () => {
+  it('is pool-addressed, and only shown once a pool actually holds funds', () => {
     expect(formatReport(token)).not.toContain('GeckoTerminal');
-    expect(formatReport(token, { risk: risk([]) })).not.toContain('GeckoTerminal');
-    expect(formatReport(token, { risk: risk([pool]) })).toContain(
+    expect(formatReport(token, { risk: risk(0n, []) })).not.toContain('GeckoTerminal');
+    expect(formatReport(token, { risk: risk(0n) })).not.toContain('GeckoTerminal'); // created, empty
+    expect(formatReport(token, { risk: risk(MIN_FUNDED_WETH * 5n) })).toContain(
       `GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`,
     );
   });
 
   it('never uses the token address as a pool address', () => {
-    expect(formatReport(token, { risk: risk([pool]) })).not.toContain(`pools/${address}`);
+    expect(formatReport(token, { risk: risk(MIN_FUNDED_WETH * 5n) })).not.toContain(`pools/${address}`);
+  });
+
+  it('links the pool holding the most WETH', () => {
+    const small = '0x00000000000000000000000000000000000000a1' as Address;
+    const big = '0x00000000000000000000000000000000000000b2' as Address;
+    const r = risk(undefined, []);
+    r.liquidity.details = [
+      { label: 'Uniswap V2', pool: small, weth: MIN_FUNDED_WETH },
+      { label: 'Uniswap V3 0.3%', pool: big, weth: MIN_FUNDED_WETH * 50n },
+    ];
+    r.liquidity.funded = true;
+    expect(formatReport(token, { risk: r })).toContain(`pools/${big}`);
   });
 });
 
@@ -58,14 +78,21 @@ describe('formatLiquidityUpdate', () => {
     owner: { kind: 'renounced' },
     proxy: undefined,
     capabilities: ['mintable'],
-    liquidity: { v2: true, v3Fees: [], pools: [pool], complete: true },
+    liquidity: {
+      v2: true,
+      v3Fees: [],
+      pools: [pool],
+      details: [{ label: 'Uniswap V2', pool, weth: MIN_FUNDED_WETH * 10n }],
+      funded: true,
+      complete: true,
+    },
   };
 
   it('announces the liquidity, links the pool and repeats the risk lines', () => {
     const text = formatLiquidityUpdate(token, risk);
     expect(text).toContain('Liquidity added: Pepe (PEPE)');
     expect(text).toContain(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`);
-    expect(text).toContain('Liquidity (vs WETH): Uniswap V2');
+    expect(text).toContain('Liquidity (vs WETH): Uniswap V2 (0.10 WETH)');
     expect(text).toContain('Owner: renounced');
     expect(text).toContain('Flags: mintable');
   });

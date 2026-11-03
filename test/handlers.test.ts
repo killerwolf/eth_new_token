@@ -163,14 +163,22 @@ describe('onContractCreated', () => {
 });
 
 describe('liquidity follow-up', () => {
-  const liquidity = (pools: string[]): RiskReport => ({
+  const POOL = '0x00000000000000000000000000000000000000d2' as Address;
+  type State = 'none' | 'empty' | 'funded';
+  const liquidity = (state: State): RiskReport => ({
     decimals: 18,
     owner: { kind: 'renounced' },
     proxy: undefined,
     capabilities: [],
-    liquidity: { v2: pools.length > 0, v3Fees: [], pools: pools as never, complete: true },
+    liquidity: {
+      v2: state !== 'none',
+      v3Fees: [],
+      pools: state === 'none' ? [] : [POOL],
+      details: state === 'none' ? [] : [{ label: 'Uniswap V2', pool: POOL, weth: state === 'funded' ? 10n ** 18n : 0n }],
+      funded: state === 'funded',
+      complete: true,
+    },
   });
-  const POOL = '0x00000000000000000000000000000000000000d2';
   const mint = { token: TOKEN, to: HOLDER, value: 1000n };
 
   /** Run the next scheduled task and let its async work finish. */
@@ -178,30 +186,43 @@ describe('liquidity follow-up', () => {
     deps.due.shift()?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
+  const states = (...seq: State[]) => {
+    const fn = vi.fn();
+    seq.forEach((state) => fn.mockResolvedValueOnce(liquidity(state)));
+    return fn.mockResolvedValue(liquidity(seq.at(-1) ?? 'none'));
+  };
 
-  it('sends an update, once, when a pool shows up later, then stops following', async () => {
-    const readRisk = vi
-      .fn()
-      .mockResolvedValueOnce(liquidity([])) // at announce time: no pool yet
-      .mockResolvedValueOnce(liquidity([])) // first re-check: still none
-      .mockResolvedValue(liquidity([POOL])); // second re-check: pool exists
-    const deps = makeDeps({ readRisk });
+  it('sends an update, once, when a pool gets funded later, then stops following', async () => {
+    const deps = makeDeps({ readRisk: states('none', 'none', 'funded') });
     await onMint(deps, mint);
     expect(deps.announce).toHaveBeenCalledTimes(1);
     expect(deps.due).toHaveLength(1);
 
-    await tick(deps); // still no pool -> schedules the next check
+    await tick(deps); // still nothing -> schedules the next check
     expect(deps.announceUpdate).not.toHaveBeenCalled();
     expect(deps.due).toHaveLength(1);
 
-    await tick(deps); // pool found
+    await tick(deps); // funded
     expect(deps.announceUpdate).toHaveBeenCalledTimes(1);
-    expect(deps.announceUpdate).toHaveBeenCalledWith(info, liquidity([POOL]));
+    expect(deps.announceUpdate).toHaveBeenCalledWith(info, liquidity('funded'));
     expect(deps.due).toHaveLength(0);
   });
 
-  it('gives up quietly after the last re-check', async () => {
-    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])) });
+  it('a pool created empty (e.g. by the constructor) does NOT end the follow-up nor count as liquidity', async () => {
+    const deps = makeDeps({ readRisk: states('empty', 'empty', 'funded') });
+    await onMint(deps, mint);
+    expect(deps.due).toHaveLength(1); // not skipped as "already tradable"
+
+    await tick(deps); // pool exists but is empty: no update, keep following
+    expect(deps.announceUpdate).not.toHaveBeenCalled();
+    expect(deps.due).toHaveLength(1);
+
+    await tick(deps); // liquidity actually added
+    expect(deps.announceUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up quietly after the last re-check, with an empty pool too', async () => {
+    const deps = makeDeps({ readRisk: states('empty') });
     await onMint(deps, mint);
     for (let i = 0; i < LIQUIDITY_RECHECK_DELAYS_MS.length; i++) await tick(deps);
     expect(deps.announceUpdate).not.toHaveBeenCalled();
@@ -209,8 +230,8 @@ describe('liquidity follow-up', () => {
     expect(deps.reportError).not.toHaveBeenCalled();
   });
 
-  it('does not follow a token that already has a pool at announce time', async () => {
-    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([POOL])) });
+  it('does not follow a token that is already funded at announce time', async () => {
+    const deps = makeDeps({ readRisk: states('funded') });
     await onMint(deps, mint);
     expect(deps.announce).toHaveBeenCalledTimes(1);
     expect(deps.due).toHaveLength(0);
@@ -219,9 +240,9 @@ describe('liquidity follow-up', () => {
   it('keeps following after a failed re-check, and reports the failure', async () => {
     const readRisk = vi
       .fn()
-      .mockResolvedValueOnce(liquidity([]))
+      .mockResolvedValueOnce(liquidity('none'))
       .mockRejectedValueOnce(new Error('blip'))
-      .mockResolvedValue(liquidity([POOL]));
+      .mockResolvedValue(liquidity('funded'));
     const deps = makeDeps({ readRisk });
     await onMint(deps, mint);
     await tick(deps);
@@ -231,11 +252,20 @@ describe('liquidity follow-up', () => {
     expect(deps.announceUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('is bounded: no follow-up is scheduled once the budget is spent', async () => {
-    const deps = makeDeps({
-      readRisk: vi.fn().mockResolvedValue(liquidity([])),
-      followUps: new FollowUpBudget(1),
+  it('a failing announceUpdate is reported and never produces a duplicate update', async () => {
+    const announceUpdate = vi.fn(() => {
+      throw new Error('sink down');
     });
+    const deps = makeDeps({ readRisk: states('none', 'funded'), announceUpdate });
+    await onMint(deps, mint);
+    await tick(deps);
+    expect(announceUpdate).toHaveBeenCalledTimes(1);
+    expect(deps.reportError).toHaveBeenCalledTimes(1);
+    expect(deps.due).toHaveLength(0); // no retry that would announce twice
+  });
+
+  it('is bounded: no follow-up is scheduled once the budget is spent', async () => {
+    const deps = makeDeps({ readRisk: states('none'), followUps: new FollowUpBudget(1) });
     await onMint(deps, mint);
     await onMint(deps, { ...mint, token: '0x00000000000000000000000000000000000000ab' as Address });
     expect(deps.announce).toHaveBeenCalledTimes(2);
@@ -244,14 +274,22 @@ describe('liquidity follow-up', () => {
 
   it('frees its slot when it finishes, so later tokens can be followed', async () => {
     const budget = new FollowUpBudget(1);
-    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])), followUps: budget });
+    const deps = makeDeps({ readRisk: states('none'), followUps: budget });
     await onMint(deps, mint);
     for (let i = 0; i < LIQUIDITY_RECHECK_DELAYS_MS.length; i++) await tick(deps);
     expect(budget.tryAcquire()).toBe(true);
   });
 
+  it('frees its slot when the update is sent', async () => {
+    const budget = new FollowUpBudget(1);
+    const deps = makeDeps({ readRisk: states('none', 'funded'), followUps: budget });
+    await onMint(deps, mint);
+    await tick(deps);
+    expect(budget.tryAcquire()).toBe(true);
+  });
+
   it('follows tokens found through ContractCreated too', async () => {
-    const deps = makeDeps({ readRisk: vi.fn().mockResolvedValue(liquidity([])) });
+    const deps = makeDeps({ readRisk: states('none') });
     await onContractCreated(deps, TOKEN);
     expect(deps.due).toHaveLength(1);
   });
