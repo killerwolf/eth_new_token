@@ -24,6 +24,13 @@ Every detection is followed by on-chain, API-free heuristics so you know what to
   `adjustableFees`, `txLimits`.
 - **Liquidity** — whether a Uniswap V2 pair or V3 pool (0.05 / 0.3 / 1%) against WETH exists yet.
 
+**Liquidity follow-up.** A brand-new token almost never has a pool at the moment it is detected, so
+its report says `Liquidity (vs WETH): none yet`. The scanner re-checks every announced token at +2,
++10 and +30 minutes and, as soon as a Uniswap V2/V3 pool against WETH exists, sends a second
+message, `Liquidity added: …`, with the pool-addressed GeckoTerminal link and a fresh risk report
+(the owner may have renounced in the meantime). It then stops following that token. At most 200
+tokens are followed at once; follow-ups are lost if the process restarts.
+
 A probe that fails (flaky provider) is reported as `unknown`, never as a clean result.
 These are heuristics: a clean report is **not** a safety guarantee, and a flag is not proof of a rug.
 
