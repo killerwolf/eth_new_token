@@ -1,9 +1,11 @@
+import { createServer, type Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
   encodeAbiParameters,
   keccak256,
   numberToHex,
   pad,
+  stringToHex,
   toHex,
   type Address,
   type Hex,
@@ -17,117 +19,199 @@ interface RpcRequest {
   params?: unknown[];
 }
 
+type RpcOutcome = { result: unknown } | { error: { code: number; message: string; data?: string } };
+
 export interface FakeToken {
   address: Address;
   name: string;
   symbol: string;
   totalSupply: bigint;
+  /** Legacy token (MKR-style): name()/symbol() return bytes32 instead of string. */
+  legacyBytes32?: boolean;
 }
 
+export interface FakeLog {
+  address: Address;
+  topics: Hex[];
+  data: Hex;
+}
+
+const revert = (): RpcOutcome => ({
+  error: { code: 3, message: 'execution reverted', data: '0x' },
+});
+
 /**
- * Minimal Ethereum JSON-RPC node over WebSocket: just enough of eth_subscribe / eth_call /
- * eth_getCode for the scanner, so tests exercise viem's real subscription path offline.
+ * Minimal Ethereum JSON-RPC node serving the same methods over WebSocket (eth_subscribe push)
+ * and HTTP (eth_newFilter / eth_getFilterChanges polling), so tests drive viem's real transports
+ * offline. Not a live-network substitute: it only proves the client wiring.
  */
 export class FakeNode {
-  private readonly server: WebSocketServer;
+  private readonly http: Server;
+  private readonly ws: WebSocketServer;
   private readonly sockets = new Set<WebSocket>();
   private subscription: { socket: WebSocket; id: string } | undefined;
-  private waiter: (() => void) | undefined;
+  private pendingFilterLogs: unknown[] = [];
+  private filterInstalled = false;
+  private waiters: Array<() => void> = [];
 
-  constructor(private readonly tokens: FakeToken[]) {
-    this.server = new WebSocketServer({ port: 0 });
-    this.server.on('connection', (socket) => {
-      this.sockets.add(socket);
-      socket.on('message', (raw) => this.handle(socket, JSON.parse(String(raw)) as RpcRequest));
+  /** Start a node already listening on a free port. */
+  static async start(tokens: FakeToken[]): Promise<FakeNode> {
+    const node = new FakeNode(tokens);
+    await new Promise<void>((resolve) => node.http.once('listening', resolve));
+    return node;
+  }
+
+  private constructor(private readonly tokens: FakeToken[]) {
+    this.http = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as RpcRequest | RpcRequest[];
+        const answer = (request: RpcRequest) => ({
+          jsonrpc: '2.0',
+          id: request.id,
+          ...this.dispatch(request.method, request.params ?? []),
+        });
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(Array.isArray(body) ? body.map(answer) : answer(body)));
+      });
     });
+    this.ws = new WebSocketServer({ server: this.http });
+    this.ws.on('connection', (socket) => {
+      this.sockets.add(socket);
+      socket.on('message', (raw) => {
+        const request = JSON.parse(String(raw)) as RpcRequest;
+        const outcome =
+          request.method === 'eth_subscribe'
+            ? this.subscribe(socket)
+            : this.dispatch(request.method, request.params ?? []);
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id: request.id, ...outcome }));
+      });
+    });
+    this.http.listen(0, '127.0.0.1');
   }
 
-  get url(): string {
-    const address = this.server.address();
+  private get port(): number {
+    const address = this.http.address();
     if (typeof address === 'string' || address === null) throw new Error('not listening');
-    return `ws://127.0.0.1:${address.port}`;
+    return address.port;
   }
 
-  /** Resolves once a client has called eth_subscribe. */
+  get wsUrl(): string {
+    return `ws://127.0.0.1:${this.port}`;
+  }
+
+  get httpUrl(): string {
+    return `http://127.0.0.1:${this.port}`;
+  }
+
+  /** Resolves once a client has subscribed (WebSocket) or installed a filter (HTTP polling). */
   async subscribed(): Promise<void> {
-    if (this.subscription) return;
-    await new Promise<void>((resolve) => (this.waiter = resolve));
+    if (this.subscription || this.filterInstalled) return;
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
   }
 
-  /** Push a log to the subscriber. `topics` decides ERC-20 (3) vs ERC-721 (4) shape. */
-  emitLog(log: { address: Address; topics: Hex[]; data: Hex }): void {
-    if (!this.subscription) throw new Error('no subscriber');
-    this.subscription.socket.send(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'eth_subscription',
-        params: {
-          subscription: this.subscription.id,
-          result: {
-            ...log,
-            blockNumber: '0x1',
-            blockHash: pad('0x01', { size: 32 }),
-            transactionHash: pad('0x02', { size: 32 }),
-            transactionIndex: '0x0',
-            logIndex: '0x0',
-            removed: false,
-          },
-        },
-      }),
-    );
+  /** Make `log` visible to whichever client is connected: pushed over WS, or queued for polling. */
+  emitLog(log: FakeLog): void {
+    const full = {
+      ...log,
+      blockNumber: '0x1',
+      blockHash: pad('0x01', { size: 32 }),
+      transactionHash: pad('0x02', { size: 32 }),
+      transactionIndex: '0x0',
+      logIndex: '0x0',
+      removed: false,
+    };
+    if (this.subscription) {
+      this.subscription.socket.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_subscription',
+          params: { subscription: this.subscription.id, result: full },
+        }),
+      );
+    } else if (this.filterInstalled) {
+      this.pendingFilterLogs.push(full);
+    } else {
+      throw new Error('no subscriber');
+    }
+  }
+
+  /** Kill every client connection (server stays up): simulates a provider/network blip. */
+  dropConnections(): void {
+    for (const socket of this.sockets) socket.terminate();
+    this.sockets.clear();
+    this.subscription = undefined;
   }
 
   async close(): Promise<void> {
     for (const socket of this.sockets) socket.terminate();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    this.http.closeAllConnections();
+    await new Promise<void>((resolve) => this.http.close(() => resolve()));
   }
 
-  private handle(socket: WebSocket, { id, method, params = [] }: RpcRequest): void {
-    const reply = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: '2.0', id, result }));
-    const revert = () =>
-      socket.send(
-        JSON.stringify({ jsonrpc: '2.0', id, error: { code: 3, message: 'execution reverted', data: '0x' } }),
-      );
+  private subscribe(socket: WebSocket): RpcOutcome {
+    this.subscription = { socket, id: '0xfeed' };
+    this.release();
+    return { result: '0xfeed' };
+  }
 
+  private release(): void {
+    for (const resolve of this.waiters.splice(0)) resolve();
+  }
+
+  private dispatch(method: string, params: unknown[]): RpcOutcome {
     switch (method) {
-      case 'eth_subscribe':
-        this.subscription = { socket, id: '0xfeed' };
-        reply('0xfeed');
-        this.waiter?.();
-        return;
+      case 'eth_chainId':
+        return { result: '0x1' };
+      case 'eth_blockNumber':
+        return { result: '0x1' };
       case 'eth_unsubscribe':
-        reply(true);
-        return;
-      case 'eth_getCode':
-        reply('0x6080604052');
-        return;
-      case 'eth_getStorageAt':
-        reply(pad('0x', { size: 32 }));
-        return;
-      case 'eth_call': {
-        const { to, data } = params[0] as { to: Address; data?: Hex; input?: Hex };
-        const input = (data ?? (params[0] as { input?: Hex }).input ?? '0x') as Hex;
-        const token = this.tokens.find((t) => t.address.toLowerCase() === to.toLowerCase());
-        if (!token) {
-          // Factories (Uniswap getPair/getPool): "no pool".
-          reply(pad('0x', { size: 32 }));
-          return;
-        }
-        switch (input.slice(0, 10)) {
-          case '0x18160ddd':
-            return reply(encodeAbiParameters([{ type: 'uint256' }], [token.totalSupply]));
-          case '0x06fdde03':
-            return reply(encodeAbiParameters([{ type: 'string' }], [token.name]));
-          case '0x95d89b41':
-            return reply(encodeAbiParameters([{ type: 'string' }], [token.symbol]));
-          case '0x313ce567':
-            return reply(numberToHex(18, { size: 32 }));
-          default:
-            return revert();
-        }
+      case 'eth_uninstallFilter':
+        return { result: true };
+      case 'eth_newFilter':
+        this.filterInstalled = true;
+        this.release();
+        return { result: '0xf11e' };
+      case 'eth_getFilterChanges': {
+        const logs = this.pendingFilterLogs;
+        this.pendingFilterLogs = [];
+        return { result: logs };
       }
+      case 'eth_getCode':
+        return { result: '0x6080604052' };
+      case 'eth_getStorageAt':
+        return { result: pad('0x', { size: 32 }) };
+      case 'eth_call':
+        return this.call(params[0] as { to: Address; data?: Hex; input?: Hex });
       default:
-        revert();
+        return revert();
+    }
+  }
+
+  private text(token: FakeToken, value: string): Hex {
+    return token.legacyBytes32
+      ? stringToHex(value, { size: 32 })
+      : encodeAbiParameters([{ type: 'string' }], [value]);
+  }
+
+  private call({ to, data, input }: { to: Address; data?: Hex; input?: Hex }): RpcOutcome {
+    const calldata = data ?? input ?? '0x';
+    const token = this.tokens.find((t) => t.address.toLowerCase() === to.toLowerCase());
+    // Not a known token => a factory (Uniswap getPair/getPool): answer "no pool".
+    if (!token) return { result: pad('0x', { size: 32 }) };
+
+    switch (calldata.slice(0, 10)) {
+      case '0x18160ddd':
+        return { result: encodeAbiParameters([{ type: 'uint256' }], [token.totalSupply]) };
+      case '0x06fdde03':
+        return { result: this.text(token, token.name) };
+      case '0x95d89b41':
+        return { result: this.text(token, token.symbol) };
+      case '0x313ce567':
+        return { result: numberToHex(18, { size: 32 }) };
+      default:
+        return revert();
     }
   }
 }

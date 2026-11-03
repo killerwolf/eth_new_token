@@ -1,4 +1,5 @@
 import { parseAbiItem, zeroAddress, type PublicClient } from 'viem';
+import { formatErrorForLog } from './errors.js';
 import { onContractCreated, onMint, type Deps } from './handlers.js';
 
 const contractCreatedEvent = parseAbiItem('event ContractCreated(address indexed contractAddress)');
@@ -8,19 +9,8 @@ const transferEvent = parseAbiItem(
 
 type Unwatch = () => void;
 
-/** Subscription errors aren't always `Error`s (browser-style `ErrorEvent`s from the socket). */
-export function describeError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'object' && error !== null) {
-    const { message, type } = error as { message?: unknown; type?: unknown };
-    if (typeof message === 'string' && message) return message;
-    if (typeof type === 'string') return `${type} event`;
-  }
-  return String(error);
-}
-
 const logError = (context: string) => (error: unknown) =>
-  console.error(`${context}: ${describeError(error)}`);
+  console.error(`${context}: ${formatErrorForLog(error)}`);
 
 export function watchContractCreated(client: PublicClient, deps: Deps): Unwatch {
   return client.watchEvent({

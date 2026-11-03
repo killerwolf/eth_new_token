@@ -4,28 +4,76 @@ import type { RiskReport } from './risk.js';
 import { SeenSet } from './seen.js';
 
 export interface Deps {
+  /** `undefined` = definitively not an ERC-20. Throws on provider failure (retryable). */
   readTotalSupply(address: Address): Promise<bigint | undefined>;
   readTokenInfo(address: Address): Promise<TokenInfo | undefined>;
   /** Best-effort risk probe; must not throw. */
   readRisk(address: Address): Promise<RiskReport | undefined>;
   announce(token: TokenInfo, extras: ReportExtras): void;
+  /** Run `task` later (production: unref'd `setTimeout`). Injected so tests control time. */
+  schedule(task: () => void, delayMs: number): void;
+  /** Report a failure that has no caller to throw to (scheduled retries, giving up). */
+  reportError(error: unknown): void;
   seen: SeenSet<Address>;
+}
+
+/**
+ * Delays before the re-attempts that follow a transient provider failure: 1 try + 2 re-tries,
+ * on top of the short in-read retries done by the ERC-20 readers. Bounded on purpose, so a
+ * hostile token that spams events (or a long outage) can never cause a retry storm.
+ */
+export const RETRY_DELAYS_MS = [15_000, 60_000] as const;
+
+export const scheduleLater = (task: () => void, delayMs: number): void => {
+  setTimeout(task, delayMs).unref();
+};
+
+async function attempt(
+  deps: Deps,
+  address: Address,
+  work: () => Promise<void>,
+  failures: number,
+): Promise<void> {
+  try {
+    await work();
+  } catch (error) {
+    const delay = RETRY_DELAYS_MS[failures];
+    if (delay === undefined) {
+      deps.reportError(new Error(`Giving up on ${address} after ${failures + 1} attempts`, { cause: error }));
+    } else {
+      deps.schedule(() => {
+        attempt(deps, address, work, failures + 1).catch(deps.reportError);
+      }, delay);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Claim `address` so duplicate events are ignored — the claim is held through the whole retry
+ * cycle (no parallel duplicates, no retry storm). A definitive outcome (announced, or judged
+ * not-a-token) ends it; a transient provider failure schedules a bounded re-attempt, because
+ * for a one-off event (ContractCreated, a token's first mint) no later event will come.
+ */
+async function once(deps: Deps, address: Address, work: () => Promise<void>): Promise<void> {
+  if (!deps.seen.add(address)) return;
+  await attempt(deps, address, work, 0);
 }
 
 /** `ContractCreated(address indexed)` — announce the new contract if it behaves like an ERC-20. */
 export async function onContractCreated(deps: Deps, created: Address): Promise<void> {
   const address = getAddress(created);
-  if (!deps.seen.add(address)) return;
-  if ((await deps.readTotalSupply(address)) === undefined) return;
+  await once(deps, address, async () => {
+    if ((await deps.readTotalSupply(address)) === undefined) return;
 
-  const token = await deps.readTokenInfo(address);
-  if (!token) return;
-  deps.announce(token, { risk: await deps.readRisk(address) });
+    const token = await deps.readTokenInfo(address);
+    if (token) deps.announce(token, { risk: await deps.readRisk(address) });
+  });
 }
 
 /**
  * `Transfer(0x0 -> to, value)` — a token is "new" when its very first mint equals the
- * whole supply. Cheapest checks first: every extra RPC call counts against Infura quota.
+ * whole supply. Cheapest checks first: every extra RPC call counts against provider quota.
  */
 export async function onMint(
   deps: Deps,
@@ -33,12 +81,11 @@ export async function onMint(
 ): Promise<void> {
   if (mint.value === 0n) return;
   const address = getAddress(mint.token);
-  if (!deps.seen.add(address)) return;
+  await once(deps, address, async () => {
+    const totalSupply = await deps.readTotalSupply(address);
+    if (totalSupply !== mint.value) return;
 
-  const totalSupply = await deps.readTotalSupply(address);
-  if (totalSupply !== mint.value) return;
-
-  const token = await deps.readTokenInfo(address);
-  if (!token) return;
-  deps.announce(token, { holder: mint.to, risk: await deps.readRisk(address) });
+    const token = await deps.readTokenInfo(address);
+    if (token) deps.announce(token, { holder: mint.to, risk: await deps.readRisk(address) });
+  });
 }

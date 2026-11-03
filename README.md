@@ -1,7 +1,7 @@
 # eth-new-token
 
 Realtime scanner that flags **freshly minted ERC-20 tokens** on Ethereum mainnet, built with
-TypeScript and [viem](https://viem.sh). It subscribes to logs over an Infura WebSocket and prints
+TypeScript and [viem](https://viem.sh). It follows logs over WebSocket (push) or HTTP (polling) and prints
 the token plus links for quick vetting.
 
 ## Modes
@@ -24,20 +24,28 @@ Every detection is followed by on-chain, API-free heuristics so you know what to
   `adjustableFees`, `txLimits`.
 - **Liquidity** — whether a Uniswap V2 pair or V3 pool (0.05 / 0.3 / 1%) against WETH exists yet.
 
+A probe that fails (flaky provider) is reported as `unknown`, never as a clean result.
 These are heuristics: a clean report is **not** a safety guarantee, and a flag is not proof of a rug.
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env   # then set ETH_WS_URL
+cp .env.example .env   # then set ETH_RPC_URL
 ```
 
-### Choosing a provider
+### Choosing a provider and transport
 
-`ETH_WS_URL` is the full WebSocket endpoint of any **Ethereum mainnet** node (Infura, Alchemy,
-QuickNode, your own). Swap providers by editing that one line. It usually contains your API key, so
-keep `.env` out of git (it is gitignored) and note it is never printed in error messages.
+`ETH_RPC_URL` is the full endpoint of any **Ethereum mainnet** node (Infura, Alchemy, QuickNode,
+your own). Swap providers by editing that one line. The URL scheme picks the transport:
+
+| Scheme | Transport | When to use |
+| --- | --- | --- |
+| `wss://` / `ws://` | Push subscriptions | Lowest latency, recommended |
+| `https://` / `http://` | Polling every ~6 s (`eth_newFilter`, falling back to `eth_getLogs`) | Environments where WebSockets are blocked (proxies, some CI/cloud sandboxes) |
+
+The URL usually contains your API key, so keep `.env` out of git (it is gitignored); it is never
+printed in error messages. The previous variable name `ETH_WS_URL` is still accepted.
 
 ### Notifications (optional)
 
@@ -77,6 +85,19 @@ Flags: none detected
 Liquidity (vs WETH): none yet
 ```
 
+## Reliability and security notes
+
+- A transient RPC failure never hides a token: reads are retried (0.5 s, 1.5 s, 3 s), and if the
+  provider keeps failing the token is released so the next event retries it. Only a definitive
+  answer (revert, undecodable data, still no code) marks a token as "seen".
+- Token names and symbols are chosen by the deployer, so they are sanitised before display
+  (control/bidi characters stripped, URL schemes defanged, 64-character cap) and escaped per
+  medium (Discord markdown). Discord messages disable mentions and link previews.
+- RPC URLs, webhook URLs and bot tokens are redacted from every log line, including the ones
+  viem prints itself.
+- If the provider connection cannot be re-established the process exits with code 1, so a
+  supervisor (`Restart=on-failure`, Docker `restart: on-failure`) restarts it.
+
 ## Development
 
 ```bash
@@ -85,8 +106,9 @@ npm test
 ```
 
 CI runs typecheck, tests and build on Node 20 and 22. The test suite includes an integration test
-that runs the real viem WebSocket subscription path against an in-process fake JSON-RPC node
-(`test/helpers/fakeNode.ts`), so no network or API key is needed.
+that runs both the WebSocket and the HTTP-polling paths of viem against an in-process fake JSON-RPC
+node (`test/helpers/fakeNode.ts`), so no network or API key is needed. It proves the client wiring,
+not behaviour on the live network.
 
 ## Layout
 
@@ -96,7 +118,10 @@ src/
   config.ts     argv/env validation
   watch.ts      viem event subscriptions (typed from the ABI)
   handlers.ts   pure detection logic, RPC injected → unit-tested
-  erc20.ts      totalSupply / name / symbol reads (string + legacy bytes32)
+  erc20.ts      totalSupply / name / symbol reads (string + legacy bytes32), with retry
+  errors.ts     error classification (transient / definitive) + URL-safe messages
+  text.ts       sanitising of attacker-controlled labels
+  safeConsole.ts  redacts URLs from third-party console output
   risk.ts       bytecode/owner/proxy/liquidity heuristics
   notify.ts     Discord + Telegram sinks
   report.ts     output formatting

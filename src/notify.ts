@@ -1,5 +1,9 @@
+import { escapeDiscordMarkdown } from './text.js';
+
 export interface Notifier {
   readonly name: string;
+  /** Escape untrusted token labels for this medium (see `formatReport`). */
+  escape(label: string): string;
   send(message: string): Promise<void>;
 }
 
@@ -22,15 +26,18 @@ async function postJson(fetchFn: FetchFn, url: string, body: unknown): Promise<v
 
 /** Discord rejects `content` longer than 2000 characters. */
 const DISCORD_LIMIT = 2000;
+const SUPPRESS_EMBEDS = 1 << 2;
 
 export function discordNotifier(webhookUrl: string, fetchFn: FetchFn = fetch): Notifier {
   return {
     name: 'discord',
+    escape: escapeDiscordMarkdown,
     send: (message) =>
       postJson(fetchFn, webhookUrl, {
         content: message.slice(0, DISCORD_LIMIT),
-        // Never let a token name ping @everyone.
+        // Never let a token name ping @everyone, and don't unfurl link previews.
         allowed_mentions: { parse: [] },
+        flags: SUPPRESS_EMBEDS,
       }),
   };
 }
@@ -42,6 +49,8 @@ export function telegramNotifier(
 ): Notifier {
   return {
     name: 'telegram',
+    // Sent without a parse_mode, so Telegram treats the text as plain.
+    escape: (label) => label,
     send: (message) =>
       postJson(fetchFn, `https://api.telegram.org/bot${botToken}/sendMessage`, {
         chat_id: chatId,
