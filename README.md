@@ -30,8 +30,14 @@ These are heuristics: a clean report is **not** a safety guarantee, and a flag i
 
 ```bash
 npm install
-cp .env.example .env   # then set INFURA_PROJECT_ID
+cp .env.example .env   # then set ETH_WS_URL
 ```
+
+### Choosing a provider
+
+`ETH_WS_URL` is the full WebSocket endpoint of any **Ethereum mainnet** node (Infura, Alchemy,
+QuickNode, your own). Swap providers by editing that one line. It usually contains your API key, so
+keep `.env` out of git (it is gitignored) and note it is never printed in error messages.
 
 ### Notifications (optional)
 

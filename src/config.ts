@@ -18,10 +18,28 @@ export function loadConfig(argv: readonly string[], env: NodeJS.ProcessEnv): Con
     throw new ConfigError(`Invalid mode "${mode ?? ''}". Use one of: ${MODES.join(', ')}.`);
   }
 
-  const projectId = env.INFURA_PROJECT_ID?.trim();
-  if (!projectId) {
-    throw new ConfigError('INFURA_PROJECT_ID is not set (see .env.example).');
+  return { mode, wsUrl: parseWsUrl(env) };
+}
+
+/**
+ * The URL usually embeds a provider API key, so error messages must never echo it.
+ * Any Ethereum mainnet WebSocket endpoint works (Infura, Alchemy, QuickNode, a local node…).
+ */
+function parseWsUrl(env: NodeJS.ProcessEnv): string {
+  const raw = env.ETH_WS_URL?.trim();
+  if (!raw) {
+    const legacy = env.INFURA_PROJECT_ID ? ' INFURA_PROJECT_ID is no longer used: put the full URL in ETH_WS_URL.' : '';
+    throw new ConfigError(`ETH_WS_URL is not set (see .env.example).${legacy}`);
   }
 
-  return { mode, wsUrl: `wss://mainnet.infura.io/ws/v3/${projectId}` };
+  let protocol: string;
+  try {
+    protocol = new URL(raw).protocol;
+  } catch {
+    throw new ConfigError('ETH_WS_URL is not a valid URL.');
+  }
+  if (protocol !== 'wss:' && protocol !== 'ws:') {
+    throw new ConfigError('ETH_WS_URL must be a WebSocket URL (wss://… or ws://…).');
+  }
+  return raw;
 }
