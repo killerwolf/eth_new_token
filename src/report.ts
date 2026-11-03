@@ -1,5 +1,5 @@
 import type { Address } from 'viem';
-import { formatRisk, type RiskReport } from './risk.js';
+import { bestFundedPool, formatRisk, type RiskReport } from './risk.js';
 
 export interface TokenInfo {
   address: Address;
@@ -28,10 +28,30 @@ export function formatReport(
     `EtherScan: https://etherscan.io/address/${address}`,
     `TokenSniffer: https://tokensniffer.com/token/eth/${address}`,
   ];
-  // GeckoTerminal pages are addressed by *pool*, not by token: only link a pool that exists.
-  const pool = risk?.liquidity.pools[0];
+  // GeckoTerminal pages are addressed by *pool*, not by token: only link a pool that holds funds
+  // (an empty pool created by the token's constructor has no page worth opening).
+  const pool = risk && bestFundedPool(risk.liquidity);
   if (pool) lines.push(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`);
   if (holder) lines.push(`Holder: https://debank.com/profile/${holder}`);
   if (risk) lines.push('', ...formatRisk(risk));
+  return lines.join('\n');
+}
+
+/** Follow-up sent when a token announced without liquidity has since got a pool. */
+export function formatLiquidityUpdate(
+  token: TokenInfo,
+  risk: RiskReport,
+  escape: (label: string) => string = (label) => label,
+): string {
+  const { address } = token;
+  const pool = bestFundedPool(risk.liquidity);
+  const lines = [
+    `Liquidity added: ${escape(token.name)} (${escape(token.symbol)})`,
+    `Contract address: ${address}`,
+    `DexScreener: https://dexscreener.com/ethereum/${address}`,
+    `EtherScan: https://etherscan.io/address/${address}`,
+  ];
+  if (pool) lines.push(`GeckoTerminal: https://www.geckoterminal.com/eth/pools/${pool}`);
+  lines.push('', ...formatRisk(risk));
   return lines.join('\n');
 }

@@ -5,8 +5,8 @@ import { ConfigError, isWebSocketUrl, loadConfig } from './config.js';
 import { readTokenInfo, readTotalSupply } from './erc20.js';
 import { createNotifiers, NotifierConfigError } from './notify.js';
 import { readRisk } from './risk.js';
-import { scheduleLater, type Deps } from './handlers.js';
-import { formatReport } from './report.js';
+import { FollowUpBudget, scheduleLater, type Deps } from './handlers.js';
+import { formatLiquidityUpdate, formatReport } from './report.js';
 import { installSafeConsole } from './safeConsole.js';
 import { SeenSet } from './seen.js';
 import { diagnoseWebSocket } from './diagnose.js';
@@ -38,18 +38,23 @@ function main(): void {
 
   const notifiers = createNotifiers(process.env);
 
+  /** Print to the console and push to every configured sink, each with its own escaping. */
+  const publish = (render: (escape: (label: string) => string) => string): void => {
+    console.log(`${render((label) => label)}\n`);
+    for (const notifier of notifiers) {
+      notifier.send(render(notifier.escape)).catch((error: unknown) => {
+        console.error(`Notify (${notifier.name}) failed: ${describeError(error)}`);
+      });
+    }
+  };
+
   const deps: Deps = {
     readTotalSupply: (address) => readTotalSupply(client, address),
     readTokenInfo: (address) => readTokenInfo(client, address),
     readRisk: (address) => readRisk(client, address),
-    announce: (token, extras) => {
-      console.log(`${formatReport(token, extras)}\n`);
-      for (const notifier of notifiers) {
-        notifier.send(formatReport(token, extras, notifier.escape)).catch((error: unknown) => {
-          console.error(`Notify (${notifier.name}) failed: ${describeError(error)}`);
-        });
-      }
-    },
+    announce: (token, extras) => publish((escape) => formatReport(token, extras, escape)),
+    announceUpdate: (token, risk) => publish((escape) => formatLiquidityUpdate(token, risk, escape)),
+    followUps: new FollowUpBudget(),
     schedule: scheduleLater,
     reportError: (error) => console.error(`Retry: ${formatErrorForLog(error)}`),
     seen: new SeenSet(),

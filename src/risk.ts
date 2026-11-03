@@ -1,5 +1,7 @@
 import { classifyRpcError } from './errors.js';
 import {
+  erc20Abi,
+  formatEther,
   getAddress,
   parseAbi,
   toFunctionSelector,
@@ -47,9 +49,37 @@ const probeAbi = parseAbi([
   'function owner() view returns (address)',
 ]);
 const v2FactoryAbi = parseAbi(['function getPair(address, address) view returns (address)']);
+const v2PairAbi = parseAbi([
+  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
+]);
+const v3PoolAbi = parseAbi(['function liquidity() view returns (uint128)']);
 const v3FactoryAbi = parseAbi([
   'function getPool(address, address, uint24) view returns (address)',
 ]);
+
+export interface PoolInfo {
+  label: string;
+  pool: Address;
+  kind: 'v2' | 'v3';
+  /**
+   * WETH really backing the pool: the WETH RESERVE of a V2 pair (a donation to the pair is not a
+   * reserve), the WETH balance of a V3 pool. `undefined` if the read failed.
+   */
+  weth: bigint | undefined;
+  /** V3 only: the pool has active (in-range) liquidity. A balance alone can be a donation. */
+  active?: boolean | undefined;
+}
+
+/** Does this pool hold real, tradable liquidity (and not just exist, or hold donated dust)? */
+export const isFunded = (d: PoolInfo): boolean =>
+  d.weth !== undefined && d.weth >= MIN_FUNDED_WETH && (d.kind === 'v2' || d.active === true);
+
+/**
+ * A pool counts as funded from 0.01 WETH. Anyone can create a pool for any token (many tokens do
+ * it in their constructor) and anyone can send dust to it, so existence alone proves nothing.
+ * A heuristic threshold: the amounts are printed so readers can judge.
+ */
+export const MIN_FUNDED_WETH = 10n ** 16n;
 
 export type OwnerStatus =
   | { kind: 'none' }
@@ -71,8 +101,15 @@ export interface RiskReport {
   liquidity: {
     v2: boolean;
     v3Fees: number[];
-    /** Addresses of the pools found (V2 pair first, then V3 pools), for pool-addressed links. */
+    /**
+     * Pools that EXIST (V2 pair first, then V3). A factory returns an address as soon as the pool
+     * is created, before anyone has put a single token in it: see `funded`.
+     */
     pools: Address[];
+    /** Each existing pool with its WETH balance (`undefined` if that read failed). */
+    details: PoolInfo[];
+    /** At least one pool holds `MIN_FUNDED_WETH` or more: the token can actually be traded. */
+    funded: boolean;
     /** false when at least one pool lookup failed, so the pools above may be incomplete. */
     complete: boolean;
   };
@@ -137,6 +174,8 @@ async function resolveImplementation(
   return { proxy: undefined, implementation: undefined };
 }
 
+const FEE_LABEL: Record<number, string> = { 500: '0.05%', 3000: '0.3%', 10000: '1%' };
+
 async function readLiquidity(client: PublicClient, token: Address): Promise<RiskReport['liquidity']> {
   const [pair, ...pools] = await Promise.all([
     settle(
@@ -160,17 +199,62 @@ async function readLiquidity(client: PublicClient, token: Address): Promise<Risk
   ]);
   const found = (result: Probe<Address>): Address | undefined =>
     result.ok && result.value !== zeroAddress ? result.value : undefined;
-  const v3Found = V3_FEES.flatMap((fee, i) => {
-    const pool = found(pools[i] as Probe<Address>);
-    return pool ? [{ fee, pool }] : [];
-  });
-  const v2Pair = found(pair);
+
+  const candidates = [
+    { label: 'Uniswap V2', pool: found(pair) },
+    ...V3_FEES.map((fee, i) => ({
+      label: `Uniswap V3 ${FEE_LABEL[fee] ?? fee}`,
+      pool: found(pools[i] as Probe<Address>),
+      fee,
+    })),
+  ].filter((c): c is typeof c & { pool: Address } => c.pool !== undefined);
+
+  // Existence is not liquidity: look at what the pool really holds.
+  const wethIsToken0 = WETH.toLowerCase() < token.toLowerCase(); // Uniswap sorts pair tokens by address
+  const details: PoolInfo[] = await Promise.all(
+    candidates.map(async (c): Promise<PoolInfo> => {
+      if ('fee' in c) {
+        const [balance, liquidity] = await Promise.all([
+          settle(client.readContract({ address: WETH, abi: erc20Abi, functionName: 'balanceOf', args: [c.pool] })),
+          settle(client.readContract({ address: c.pool, abi: v3PoolAbi, functionName: 'liquidity' })),
+        ]);
+        return {
+          label: c.label,
+          pool: c.pool,
+          kind: 'v3',
+          weth: balance.ok ? balance.value : undefined,
+          active: liquidity.ok ? liquidity.value > 0n : undefined,
+        };
+      }
+      const reserves = await settle(
+        client.readContract({ address: c.pool, abi: v2PairAbi, functionName: 'getReserves' }),
+      );
+      return {
+        label: c.label,
+        pool: c.pool,
+        kind: 'v2',
+        weth: reserves.ok ? reserves.value[wethIsToken0 ? 0 : 1] : undefined,
+      };
+    }),
+  );
+
   return {
-    v2: v2Pair !== undefined,
-    v3Fees: v3Found.map(({ fee }) => fee),
-    pools: [...(v2Pair ? [v2Pair] : []), ...v3Found.map(({ pool }) => pool)],
-    complete: [pair, ...pools].every((result) => result.ok),
+    v2: found(pair) !== undefined,
+    v3Fees: candidates.flatMap((c) => ('fee' in c ? [c.fee] : [])),
+    pools: candidates.map((c) => c.pool),
+    details,
+    funded: details.some(isFunded),
+    complete:
+      [pair, ...pools].every((result) => result.ok) &&
+      details.every((d) => d.weth !== undefined && (d.kind === 'v2' || d.active !== undefined)),
   };
+}
+
+/** The funded pool holding the most WETH, if any. */
+export function bestFundedPool(liquidity: RiskReport['liquidity']): Address | undefined {
+  return liquidity.details
+    .filter(isFunded)
+    .sort((a, b) => Number((b.weth ?? 0n) - (a.weth ?? 0n)))[0]?.pool;
 }
 
 async function readOwner(client: PublicClient, address: Address): Promise<OwnerStatus> {
@@ -207,7 +291,6 @@ export async function readRisk(
   };
 }
 
-const FEE_LABEL: Record<number, string> = { 500: '0.05%', 3000: '0.3%', 10000: '1%' };
 
 export function formatRisk(risk: RiskReport): string[] {
   const owner = (() => {
@@ -223,10 +306,16 @@ export function formatRisk(risk: RiskReport): string[] {
     }
   })();
 
-  const pools = [
-    ...(risk.liquidity.v2 ? ['Uniswap V2'] : []),
-    ...risk.liquidity.v3Fees.map((fee) => `Uniswap V3 ${FEE_LABEL[fee] ?? fee}`),
-  ];
+  const amount = (d: PoolInfo): string => {
+    const { weth } = d;
+    if (weth === undefined) return 'balance unknown';
+    // A V3 position can sit entirely on the token side: no WETH yet it can be traded.
+    if (weth === 0n) return d.kind === 'v3' ? 'no WETH, token-side positions possible' : 'created, empty';
+    if (weth < MIN_FUNDED_WETH) return `${formatEther(weth)} WETH, dust`;
+    const shown = `${Number(formatEther(weth)).toFixed(2)} WETH`;
+    return isFunded(d) ? shown : `${shown}, no active liquidity`;
+  };
+  const pools = risk.liquidity.details.map((d) => `${d.label} (${amount(d)})`);
   const liquidity = (() => {
     if (!risk.liquidity.complete) {
       return pools.length ? `${pools.join(', ')} (some lookups failed)` : 'unknown (RPC error)';

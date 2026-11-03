@@ -4,8 +4,11 @@ import {
   classifyOwner,
   cloneImplementation,
   formatRisk,
+  isFunded,
+  MIN_FUNDED_WETH,
   readRisk,
   scanBytecode,
+  type PoolInfo,
   type RiskReport,
 } from '../src/risk.js';
 
@@ -44,28 +47,70 @@ describe('classifyOwner', () => {
   });
 });
 
+const P1 = '0x00000000000000000000000000000000000000d1' as Address;
+const P2 = '0x00000000000000000000000000000000000000d2' as Address;
+const weth = (amount: number): bigint => BigInt(Math.round(amount * 1e6)) * 10n ** 12n;
+const liq = (details: PoolInfo[] = [], complete = true): RiskReport['liquidity'] => ({
+  v2: details.some((d) => d.label === 'Uniswap V2'),
+  v3Fees: [],
+  pools: details.map((d) => d.pool),
+  details,
+  funded: details.some(isFunded),
+  complete,
+});
+
 describe('formatRisk', () => {
   const base: RiskReport = {
     decimals: 18,
     owner: { kind: 'renounced' },
     proxy: undefined,
     capabilities: ['mintable'],
-    liquidity: { v2: true, v3Fees: [3000], pools: [], complete: true },
+    liquidity: liq([
+      { label: 'Uniswap V2', pool: P1, kind: 'v2', weth: weth(3.5) },
+      { label: 'Uniswap V3 0.3%', pool: P2, kind: 'v3', weth: weth(1.25), active: true },
+    ]),
   };
+  const lastLine = (liquidity: RiskReport['liquidity']) => formatRisk({ ...base, liquidity }).at(-1);
 
-  it('renders every signal', () => {
+  it('renders every signal, with the WETH held by each pool', () => {
     expect(formatRisk(base)).toEqual([
       'Decimals: 18',
       'Owner: renounced',
       'Proxy: no',
       'Flags: mintable',
-      'Liquidity (vs WETH): Uniswap V2, Uniswap V3 0.3%',
+      'Liquidity (vs WETH): Uniswap V2 (3.50 WETH), Uniswap V3 0.3% (1.25 WETH)',
     ]);
   });
 
-  it('says "none yet" only when every pool lookup succeeded', () => {
-    const none = { v2: false, v3Fees: [], pools: [], complete: true };
-    expect(formatRisk({ ...base, liquidity: none }).at(-1)).toBe('Liquidity (vs WETH): none yet');
+  it('says "none yet" only when every lookup succeeded and no pool exists', () => {
+    expect(lastLine(liq())).toBe('Liquidity (vs WETH): none yet');
+  });
+
+  it('does not present a pool that exists but holds nothing as liquidity', () => {
+    expect(lastLine(liq([{ label: 'Uniswap V2', pool: P1, kind: 'v2', weth: 0n }]))).toBe(
+      'Liquidity (vs WETH): Uniswap V2 (created, empty)',
+    );
+  });
+
+  it('labels dust and unreadable balances for what they are', () => {
+    expect(lastLine(liq([{ label: 'Uniswap V2', pool: P1, kind: 'v2', weth: 1n }]))).toBe(
+      'Liquidity (vs WETH): Uniswap V2 (0.000000000000000001 WETH, dust)',
+    );
+    expect(lastLine(liq([{ label: 'Uniswap V2', pool: P1, kind: 'v2', weth: undefined }]))).toBe(
+      'Liquidity (vs WETH): Uniswap V2 (balance unknown)',
+    );
+  });
+
+  it('does not call a V3 pool without WETH "empty": positions can be token-side only', () => {
+    expect(lastLine(liq([{ label: 'Uniswap V3 0.3%', pool: P1, kind: 'v3', weth: 0n, active: false }]))).toBe(
+      'Liquidity (vs WETH): Uniswap V3 0.3% (no WETH, token-side positions possible)',
+    );
+  });
+
+  it('flags WETH sitting in a V3 pool with no active liquidity (a donation, not a market)', () => {
+    expect(lastLine(liq([{ label: 'Uniswap V3 1%', pool: P1, kind: 'v3', weth: weth(2), active: false }]))).toBe(
+      'Liquidity (vs WETH): Uniswap V3 1% (2.00 WETH, no active liquidity)',
+    );
   });
 
   it('never presents failed probes as a clean result', () => {
@@ -74,7 +119,7 @@ describe('formatRisk', () => {
       owner: { kind: 'unknown' },
       proxy: 'unknown',
       capabilities: undefined,
-      liquidity: { v2: false, v3Fees: [], pools: [], complete: false },
+      liquidity: liq([], false),
     });
     expect(lines).toEqual([
       'Decimals: unknown',
@@ -86,8 +131,9 @@ describe('formatRisk', () => {
   });
 
   it('flags partial liquidity results', () => {
-    const lines = formatRisk({ ...base, liquidity: { v2: true, v3Fees: [], pools: [], complete: false } });
-    expect(lines.at(-1)).toBe('Liquidity (vs WETH): Uniswap V2 (some lookups failed)');
+    expect(lastLine(liq([{ label: 'Uniswap V2', pool: P1, kind: 'v2', weth: weth(3.5) }], false))).toBe(
+      'Liquidity (vs WETH): Uniswap V2 (3.50 WETH) (some lookups failed)',
+    );
   });
 });
 
@@ -120,7 +166,7 @@ describe('readRisk with a flaky provider', () => {
       owner: { kind: 'none' },
       proxy: undefined,
       capabilities: [],
-      liquidity: { v2: false, v3Fees: [], pools: [], complete: true },
+      liquidity: { v2: false, v3Fees: [], pools: [], details: [], funded: false, complete: true },
     });
   });
 
@@ -136,7 +182,7 @@ describe('readRisk with a flaky provider', () => {
       }),
       TOKEN,
     );
-    expect(risk?.liquidity).toEqual({ v2: false, v3Fees: [], pools: [], complete: false });
+    expect(risk?.liquidity).toEqual({ v2: false, v3Fees: [], pools: [], details: [], funded: false, complete: false });
   });
 
   it('keeps pools it did find when other lookups fail', async () => {
@@ -146,13 +192,14 @@ describe('readRisk with a flaky provider', () => {
         readContract: async (fn) => {
           if (fn === 'getPair') return pool;
           if (fn === 'getPool') throw network();
+          if (fn === 'getReserves') return [0n, weth(2), 0];
           if (fn === 'decimals') return 18;
           throw named('ContractFunctionRevertedError');
         },
       }),
       TOKEN,
     );
-    expect(risk?.liquidity).toEqual({ v2: true, v3Fees: [], pools: [pool], complete: false });
+    expect(risk?.liquidity).toMatchObject({ v2: true, v3Fees: [], pools: [pool], funded: true, complete: false });
   });
 
   it('collects the addresses of the pools it finds (V2 pair first, then V3)', async () => {
@@ -163,6 +210,9 @@ describe('readRisk with a flaky provider', () => {
         readContract: async (fn) => {
           if (fn === 'getPair') return v2;
           if (fn === 'getPool') return v3; // answered for each fee tier
+          if (fn === 'balanceOf') return weth(1);
+          if (fn === 'liquidity') return 5n;
+          if (fn === 'getReserves') return [0n, weth(1), 0];
           if (fn === 'decimals') return 18;
           throw named('ContractFunctionRevertedError');
         },
@@ -171,6 +221,101 @@ describe('readRisk with a flaky provider', () => {
     );
     expect(risk?.liquidity.pools).toEqual([v2, v3, v3, v3]);
     expect(risk?.liquidity.v3Fees).toEqual([500, 3000, 10000]);
+  });
+
+  describe('a pool that exists is not liquidity', () => {
+    const POOL = '0x00000000000000000000000000000000000000dd' as Address;
+    // TOKEN (0x..aa) sorts below WETH (0xC02a..), so WETH is token1 / reserve1 in a V2 pair.
+    const v2 = (reserves: () => Promise<readonly [bigint, bigint, number]>, balance = async () => weth(100)) =>
+      readRisk(
+        clientWith({
+          readContract: async (fn) => {
+            if (fn === 'getPair') return POOL; // e.g. created in the token's constructor
+            if (fn === 'getReserves') return reserves();
+            if (fn === 'balanceOf') return balance(); // must be ignored for V2: donations
+            if (fn === 'decimals') return 18;
+            if (fn === 'owner') throw named('ContractFunctionRevertedError');
+            return zeroAddress;
+          },
+        }),
+        TOKEN,
+      );
+    const v3 = (balance: () => Promise<bigint>, liquidity: () => Promise<bigint>) =>
+      readRisk(
+        clientWith({
+          readContract: async (fn) => {
+            if (fn === 'getPool') return POOL;
+            if (fn === 'balanceOf') return balance();
+            if (fn === 'liquidity') return liquidity();
+            if (fn === 'decimals') return 18;
+            if (fn === 'owner') throw named('ContractFunctionRevertedError');
+            return zeroAddress;
+          },
+        }),
+        TOKEN,
+      );
+
+    it('an empty V2 pair exists but is not funded', async () => {
+      const risk = await v2(async () => [0n, 0n, 0]);
+      expect(risk?.liquidity).toMatchObject({ v2: true, pools: [POOL], funded: false, complete: true });
+      expect(risk?.liquidity.details).toEqual([{ label: 'Uniswap V2', pool: POOL, kind: 'v2', weth: 0n }]);
+    });
+
+    it('a WETH donation to a V2 pair is not liquidity: reserves are what count', async () => {
+      const risk = await v2(async () => [0n, 0n, 0], async () => weth(5)); // 5 WETH sent, nothing minted
+      expect(risk?.liquidity.funded).toBe(false);
+    });
+
+    it('reads the WETH side of the reserves, whichever side the address sort puts it on', async () => {
+      expect((await v2(async () => [weth(900), weth(2), 0]))?.liquidity.details[0]?.weth).toBe(weth(2));
+
+      const HIGH = '0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF' as Address; // sorts above WETH
+      const risk = await readRisk(
+        clientWith({
+          readContract: async (fn) => {
+            if (fn === 'getPair') return POOL;
+            if (fn === 'getReserves') return [weth(2), weth(900), 0];
+            if (fn === 'decimals') return 18;
+            if (fn === 'owner') throw named('ContractFunctionRevertedError');
+            return zeroAddress;
+          },
+        }),
+        HIGH,
+      );
+      expect(risk?.liquidity.details[0]?.weth).toBe(weth(2)); // WETH is token0 here
+    });
+
+    it('dust below the threshold does not count as funded; the threshold and above does', async () => {
+      expect((await v2(async () => [0n, MIN_FUNDED_WETH - 1n, 0]))?.liquidity.funded).toBe(false);
+      expect((await v2(async () => [0n, MIN_FUNDED_WETH, 0]))?.liquidity.funded).toBe(true);
+      expect((await v2(async () => [0n, weth(40), 0]))?.liquidity.funded).toBe(true);
+    });
+
+    it('an unreadable V2 reserve is unknown, never "funded" or "empty"', async () => {
+      const risk = await v2(async () => {
+        throw network();
+      });
+      expect(risk?.liquidity.details).toEqual([{ label: 'Uniswap V2', pool: POOL, kind: 'v2', weth: undefined }]);
+      expect(risk?.liquidity).toMatchObject({ funded: false, complete: false });
+    });
+
+    it('V3: WETH plus active liquidity is funded', async () => {
+      const risk = await v3(async () => weth(3), async () => 10n);
+      expect(risk?.liquidity).toMatchObject({ funded: true, v3Fees: [500, 3000, 10000].slice(0, 3), complete: true });
+    });
+
+    it('V3: WETH sent to a pool with no active liquidity is a donation, not funding', async () => {
+      const risk = await v3(async () => weth(3), async () => 0n);
+      expect(risk?.liquidity.funded).toBe(false);
+      expect(risk?.liquidity.details[0]).toMatchObject({ kind: 'v3', weth: weth(3), active: false });
+    });
+
+    it('V3: an unreadable liquidity() leaves the pool unfunded and the report incomplete', async () => {
+      const risk = await v3(async () => weth(3), async () => {
+        throw network();
+      });
+      expect(risk?.liquidity).toMatchObject({ funded: false, complete: false });
+    });
   });
 
   it('distinguishes "no owner()" (revert) from "could not ask" (provider error)', async () => {

@@ -10,6 +10,10 @@ export interface Deps {
   /** Best-effort risk probe; must not throw. */
   readRisk(address: Address): Promise<RiskReport | undefined>;
   announce(token: TokenInfo, extras: ReportExtras): void;
+  /** A previously announced token has since got liquidity (see `followLiquidity`). */
+  announceUpdate(token: TokenInfo, risk: RiskReport): void;
+  /** Bounds how many tokens are being followed at once. */
+  followUps: FollowUpBudget;
   /** Run `task` later (production: unref'd `setTimeout`). Injected so tests control time. */
   schedule(task: () => void, delayMs: number): void;
   /** Report a failure that has no caller to throw to (scheduled retries, giving up). */
@@ -24,9 +28,92 @@ export interface Deps {
  */
 export const RETRY_DELAYS_MS = [15_000, 60_000] as const;
 
+/**
+ * A brand-new token almost never has a pool at the moment it is detected, so its liquidity line
+ * says "none yet". Re-check a few times and send an update once a pool appears: that is when the
+ * token becomes tradable. Bounded in time (3 checks, ~30 min) and in number (`FollowUpBudget`).
+ */
+export const LIQUIDITY_RECHECK_DELAYS_MS = [2 * 60_000, 10 * 60_000, 30 * 60_000] as const;
+
+/** A counting semaphore: how many tokens are currently followed. */
+export class FollowUpBudget {
+  private active = 0;
+
+  constructor(private readonly limit = 200) {}
+
+  tryAcquire(): boolean {
+    if (this.active >= this.limit) return false;
+    this.active++;
+    return true;
+  }
+
+  release(): void {
+    this.active = Math.max(0, this.active - 1);
+  }
+}
+
 export const scheduleLater = (task: () => void, delayMs: number): void => {
   setTimeout(task, delayMs).unref();
 };
+
+/** A broken reporter (logger down) must never turn into an unhandled rejection that kills the scanner. */
+function report(deps: Deps, error: unknown): void {
+  try {
+    deps.reportError(error);
+  } catch {
+    // nothing left to report to
+  }
+}
+
+function followLiquidity(deps: Deps, token: TokenInfo, release: () => void, step = 0): void {
+  const delay = LIQUIDITY_RECHECK_DELAYS_MS[step];
+  if (delay === undefined) {
+    release();
+    return;
+  }
+  deps.schedule(() => {
+    void (async () => {
+      try {
+        const risk = await deps.readRisk(token.address);
+        if (risk?.liquidity.funded) {
+          release(); // done either way: a failed announce is not retried (no duplicates)
+          try {
+            deps.announceUpdate(token, risk);
+          } catch (error) {
+            report(deps, error);
+          }
+          return;
+        }
+      } catch (error) {
+        report(deps, error); // keep following: the next check may succeed
+      }
+      followLiquidity(deps, token, release, step + 1);
+    })().catch((error: unknown) => {
+      release(); // the chain is dead (e.g. the scheduler threw): do not keep the slot
+      report(deps, error);
+    }); // a scheduled task must never become an unhandled rejection
+  }, delay);
+}
+
+/** Announce a token, then follow its liquidity if it had none yet. Never throws. */
+function announceAndFollow(deps: Deps, token: TokenInfo, extras: ReportExtras): void {
+  deps.announce(token, extras);
+  if (extras.risk?.liquidity.funded) return; // already tradable (an empty pool is not)
+  if (!deps.followUps.tryAcquire()) return;
+  let released = false;
+  // Idempotent, so one token can never free another token's slot by releasing twice.
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    deps.followUps.release();
+  };
+  try {
+    followLiquidity(deps, token, release);
+  } catch (error) {
+    release();
+    report(deps, error);
+  }
+}
 
 async function attempt(
   deps: Deps,
@@ -67,7 +154,7 @@ export async function onContractCreated(deps: Deps, created: Address): Promise<v
     if ((await deps.readTotalSupply(address)) === undefined) return;
 
     const token = await deps.readTokenInfo(address);
-    if (token) deps.announce(token, { risk: await deps.readRisk(address) });
+    if (token) announceAndFollow(deps, token, { risk: await deps.readRisk(address) });
   });
 }
 
@@ -86,6 +173,6 @@ export async function onMint(
     if (totalSupply !== mint.value) return;
 
     const token = await deps.readTokenInfo(address);
-    if (token) deps.announce(token, { holder: mint.to, risk: await deps.readRisk(address) });
+    if (token) announceAndFollow(deps, token, { holder: mint.to, risk: await deps.readRisk(address) });
   });
 }
