@@ -44,6 +44,15 @@ your own). Swap providers by editing that one line. The URL scheme picks the tra
 | `wss://` / `ws://` | Push subscriptions | Lowest latency, recommended |
 | `https://` / `http://` | Polling every ~6 s (`eth_newFilter`, falling back to `eth_getLogs`) | Environments where WebSockets are blocked (proxies, some CI/cloud sandboxes) |
 
+The scanner watches **every** contract, so the provider must allow log queries without an address
+filter. Observed on mainnet (2026-11-03):
+
+| Provider / transport | Result |
+| --- | --- |
+| drpc.org free, HTTPS polling | Works. Detected and verified a real new token on-chain. It has no `eth_newFilter` on the free plan; viem falls back to per-block `eth_getLogs`. |
+| publicnode.com, HTTPS | **Do not use.** `eth_getLogs` without an address is rejected, and its `eth_newFilter` returned far fewer logs than the chain produces (1 in 15 s, against roughly 25 per block seen on drpc), so detections would be silently missed. |
+| Infura / Alchemy, WebSocket | Recommended, but not live-tested by the author. Check your plan's log limits. |
+
 The URL usually contains your API key, so keep `.env` out of git (it is gitignored); it is never
 printed in error messages. The previous variable name `ETH_WS_URL` is still accepted.
 
@@ -85,6 +94,16 @@ Flags: none detected
 Liquidity (vs WETH): none yet
 ```
 
+## Links in the report
+
+| Link | Status |
+| --- | --- |
+| DeBank profile (holder) | Verified (page loads) |
+| Etherscan `/address/<token>` | Standard path (could not load the page from the author's sandbox: Cloudflare challenge) |
+| DexScreener `/ethereum/<token>` | Unverified (same Cloudflare challenge). Pair-addressed pages are the canonical form; the token address is resolved by DexScreener's search |
+| TokenSniffer `/token/eth/<token>` | Unverified (same) |
+| GeckoTerminal | Pages are addressed by **pool**, so the link is only shown once a Uniswap pool exists (`/eth/pools/<pool>`). A factory returns a pool address as soon as it is created, even with no liquidity, so the page can still be empty or not yet indexed |
+
 ## Reliability and security notes
 
 - A transient RPC failure never hides a token: reads are retried (0.5 s, 1.5 s, 3 s), and if the
@@ -94,7 +113,10 @@ Liquidity (vs WETH): none yet
   (control/bidi characters stripped, URL schemes defanged, 64-character cap) and escaped per
   medium (Discord markdown). Discord messages disable mentions and link previews.
 - RPC URLs, webhook URLs and bot tokens are redacted from every log line, including the ones
-  viem prints itself.
+  viem prints itself. The secret parts of your configuration (API key in the URL, webhook token,
+  bot token) are also masked when a provider echoes them without a URL around them. Provider error
+  reasons and network codes (`ENOTFOUND`, …) stay visible so a bad endpoint is diagnosable;
+  they are flattened to one line and capped at 200 characters.
 - If the provider connection cannot be re-established the process exits with code 1, so a
   supervisor (`Restart=on-failure`, Docker `restart: on-failure`) restarts it.
 
