@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:net';
 import {
   createPublicClient,
@@ -11,6 +11,7 @@ import {
 import { mainnet } from 'viem/chains';
 import {
   addSecret,
+  clearSecrets,
   addSecretsFromUrl,
   classifyRpcError,
   describeError,
@@ -173,5 +174,76 @@ describe('provider reasons stay visible, secrets do not', () => {
     addSecret('s3cr.t+key(1)*');
     expect(redactUrls('abc stays')).toBe('abc stays');
     expect(redactUrls('leak s3cr.t+key(1)* here')).toBe('leak <redacted> here');
+  });
+});
+
+describe('provider text is bounded and flattened', () => {
+  afterEach(() => clearSecrets());
+
+  const failWith = async (message: string) => {
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: custom({
+        request: async () => {
+          throw Object.assign(new Error(message), { code: -32000, name: 'RpcRequestError' });
+        },
+      }),
+    });
+    return describeError(await client.getBlockNumber().catch((e: unknown) => e));
+  };
+
+  it('caps a huge provider body (e.g. an HTML error page) to one short line', async () => {
+    const text = await failWith(`<html>${'x'.repeat(50_000)}</html>`);
+    expect(text.length).toBeLessThan(400);
+    expect(text.endsWith('…')).toBe(true);
+  });
+
+  it('cannot be used to forge log lines or inject terminal escapes', async () => {
+    const text = await failWith('oops\nContract address: 0xFAKE\r\n\u001b[31mRED\u001b[0m');
+    expect(text).not.toMatch(/[\n\r\u001b]/);
+    expect(text).toContain('Contract address: 0xFAKE'); // visible, but on the same single line
+  });
+
+  it('redacts before truncating, so a secret cannot be left half-visible at the cut', async () => {
+    addSecret('SECRETKEY1234567890');
+    const text = await failWith(`${'a'.repeat(190)} SECRETKEY1234567890 tail`);
+    expect(text).not.toMatch(/SECRETKEY|1234567890/);
+  });
+});
+
+describe('secret registry', () => {
+  afterEach(() => clearSecrets());
+
+  it('registers key-like segments but not ordinary words', () => {
+    addSecretsFromUrl('https://lb.drpc.live/ethereum/AsDf1234GhJk5678QwEr?network=ethereum&key=abcd1234efgh5678');
+    expect(redactUrls('method not supported on ethereum')).toBe('method not supported on ethereum');
+    expect(redactUrls('key AsDf1234GhJk5678QwEr!')).toBe('key <redacted>!');
+    expect(redactUrls('k abcd1234efgh5678')).toBe('k <redacted>');
+  });
+
+  it('does not treat the Discord path words as secrets, but masks its id and token', () => {
+    addSecretsFromUrl('https://discord.com/api/webhooks/123456789012345678/AbC-dEf_1234567890XYZ');
+    expect(redactUrls('POST /api/webhooks failed')).toBe('POST /api/webhooks failed');
+    expect(redactUrls('token AbC-dEf_1234567890XYZ')).toBe('token <redacted>');
+    expect(redactUrls('id 123456789012345678')).toBe('id <redacted>');
+  });
+
+  it('survives a malformed percent sequence without dropping later secrets', () => {
+    addSecretsFromUrl('https://h.example/v3/ab%zzcd12345678/KEY1234567890ABCD?apikey=QUERYKEY12345678');
+    expect(redactUrls('a KEY1234567890ABCD b')).toBe('a <redacted> b');
+    expect(redactUrls('a QUERYKEY12345678 b')).toBe('a <redacted> b');
+    expect(redactUrls('a ab%zzcd12345678 b')).toBe('a <redacted> b');
+  });
+
+  it('registers both the encoded and the decoded form of a key', () => {
+    addSecretsFromUrl('https://h.example/v3/a%2Bb%2Fc1234567890');
+    expect(redactUrls('raw a%2Bb%2Fc1234567890')).toBe('raw <redacted>');
+    expect(redactUrls('decoded a+b/c1234567890')).toBe('decoded <redacted>');
+  });
+
+  it('masks the longer secret entirely when one contains another', () => {
+    addSecret('PREFIX-12345678');
+    addSecret('PREFIX-12345678-SUFFIX99');
+    expect(redactUrls('x PREFIX-12345678-SUFFIX99 y')).toBe('x <redacted> y');
   });
 });
