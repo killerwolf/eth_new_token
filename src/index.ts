@@ -5,11 +5,11 @@ import { ConfigError, isWebSocketUrl, loadConfig } from './config.js';
 import { readTokenInfo, readTotalSupply } from './erc20.js';
 import { createNotifiers, NotifierConfigError } from './notify.js';
 import { readRisk } from './risk.js';
-import type { Deps } from './handlers.js';
+import { scheduleLater, type Deps } from './handlers.js';
 import { formatReport } from './report.js';
 import { installSafeConsole } from './safeConsole.js';
 import { SeenSet } from './seen.js';
-import { describeError } from './errors.js';
+import { describeError, formatErrorForLog } from './errors.js';
 import { watchContractCreated, watchMints } from './watch.js';
 
 /** Mainnet blocks take ~12s; polling every 6s keeps latency low without burning provider quota. */
@@ -20,7 +20,7 @@ const RECONNECT_ATTEMPTS = 1_000;
 function createTransport(url: string): Transport {
   return isWebSocketUrl(url)
     ? webSocket(url, { keepAlive: { interval: 30_000 }, reconnect: { attempts: RECONNECT_ATTEMPTS, delay: 2_000 } })
-    : http(url, { retryCount: 3, timeout: 15_000 });
+    : http(url, { retryCount: 1, timeout: 10_000 });
 }
 
 function main(): void {
@@ -46,6 +46,8 @@ function main(): void {
         });
       }
     },
+    schedule: scheduleLater,
+    reportError: (error) => console.error(`Retry: ${formatErrorForLog(error)}`),
     seen: new SeenSet(),
   };
 
@@ -72,7 +74,7 @@ function main(): void {
 installSafeConsole();
 
 process.on('unhandledRejection', (reason) => {
-  console.error(`Unhandled rejection: ${describeError(reason)}`);
+  console.error(`Unhandled rejection: ${formatErrorForLog(reason)}`);
   process.exit(1);
 });
 

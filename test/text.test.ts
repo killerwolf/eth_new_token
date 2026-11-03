@@ -5,7 +5,7 @@ describe('sanitizeLabel', () => {
   it('flattens newlines so a name cannot forge report lines', () => {
     const label = sanitizeLabel('X\nContract address: 0xFAKE\r\nEtherScan: https://evil.example');
     expect(label).not.toMatch(/[\n\r]/);
-    expect(label).toContain('hxxps://evil.example');
+    expect(label).toContain('hxxps://evil[.]example');
   });
 
   it('strips ANSI escapes and invisible/bidi characters', () => {
@@ -17,6 +17,16 @@ describe('sanitizeLabel', () => {
     const label = sanitizeLabel('😀'.repeat(500));
     expect(Array.from(label)).toHaveLength(64);
     expect(label.endsWith('…')).toBe(true);
+  });
+
+  it('defangs bare domains so chat apps do not auto-link them', () => {
+    expect(sanitizeLabel('Claim at evil.com')).toBe('Claim at evil[.]com');
+    expect(sanitizeLabel('www.evil.co.uk/airdrop')).toBe('www[.]evil[.]co[.]uk/airdrop');
+  });
+
+  it('does not mangle ordinary names containing dots between digits or before spaces', () => {
+    expect(sanitizeLabel('Pepe 2.0')).toBe('Pepe 2.0');
+    expect(sanitizeLabel('St. Louis Token v1.2')).toBe('St. Louis Token v1.2');
   });
 
   it('leaves ordinary names alone and collapses whitespace', () => {

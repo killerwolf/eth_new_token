@@ -39,8 +39,7 @@ const ZERO_DATA = new Set(['ContractFunctionZeroDataError', 'AbiDecodingZeroData
  * requested type (e.g. a legacy bytes32 `name()` read as `string` raises IntegerOutOfRangeError).
  * Retrying cannot change them.
  */
-const DEFINITIVE =
-  /^ContractFunctionRevertedError$|Decoding|OutOfRange|OutOfBounds|SizeOverflow|InvalidBytesBoolean|RecursiveReadLimit/;
+const DEFINITIVE = /Decoding|OutOfRange|OutOfBounds|SizeOverflow|InvalidBytesBoolean|RecursiveReadLimit/;
 
 export function classifyRpcError(error: unknown): RpcErrorKind {
   const names: string[] = [];
@@ -50,7 +49,25 @@ export function classifyRpcError(error: unknown): RpcErrorKind {
   }
   if (names.some((name) => ZERO_DATA.has(name))) return 'zero-data';
   if (names.some((name) => DEFINITIVE.test(name))) return 'definitive';
+  // viem wraps ANY JSON-RPC -32603 "Internal error" in ContractFunctionRevertedError too, so that
+  // name alone proves nothing: a real revert carries ExecutionRevertedError (code 3 / "execution
+  // reverted"), while a flaky provider carries InternalRpcError.
+  if (names.includes('ExecutionRevertedError')) return 'definitive';
+  if (names.includes('ContractFunctionRevertedError') && !names.includes('InternalRpcError')) {
+    return 'definitive';
+  }
   return 'transient';
+}
+
+/**
+ * Like `describeError`, but for *unexpected* failures (bugs, not provider errors): keeps the
+ * stack so they stay debuggable, still scrubbed of URLs.
+ */
+export function formatErrorForLog(error: unknown): string {
+  if (error instanceof Error && !(error instanceof BaseError) && !(error instanceof TransientRpcError)) {
+    return redactUrls(error.stack ?? error.message);
+  }
+  return describeError(error);
 }
 
 /** Thrown when an RPC read kept failing for reasons unrelated to the contract being probed. */

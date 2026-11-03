@@ -1,5 +1,5 @@
 import { parseAbiItem, zeroAddress, type PublicClient } from 'viem';
-import { describeError } from './errors.js';
+import { formatErrorForLog } from './errors.js';
 import { onContractCreated, onMint, type Deps } from './handlers.js';
 
 const contractCreatedEvent = parseAbiItem('event ContractCreated(address indexed contractAddress)');
@@ -10,7 +10,7 @@ const transferEvent = parseAbiItem(
 type Unwatch = () => void;
 
 const logError = (context: string) => (error: unknown) =>
-  console.error(`${context}: ${describeError(error)}`);
+  console.error(`${context}: ${formatErrorForLog(error)}`);
 
 export function watchContractCreated(client: PublicClient, deps: Deps): Unwatch {
   return client.watchEvent({

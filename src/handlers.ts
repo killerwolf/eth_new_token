@@ -10,22 +10,54 @@ export interface Deps {
   /** Best-effort risk probe; must not throw. */
   readRisk(address: Address): Promise<RiskReport | undefined>;
   announce(token: TokenInfo, extras: ReportExtras): void;
+  /** Run `task` later (production: unref'd `setTimeout`). Injected so tests control time. */
+  schedule(task: () => void, delayMs: number): void;
+  /** Report a failure that has no caller to throw to (scheduled retries, giving up). */
+  reportError(error: unknown): void;
   seen: SeenSet<Address>;
 }
 
 /**
- * Claim `address` so concurrent events for it are ignored, run `work`, and release the claim if
- * `work` throws: a provider hiccup must not hide a token forever, the next event retries it.
- * A *definitive* outcome (announced, or judged not-a-token) keeps the claim.
+ * Delays before the re-attempts that follow a transient provider failure: 1 try + 2 re-tries,
+ * on top of the short in-read retries done by the ERC-20 readers. Bounded on purpose, so a
+ * hostile token that spams events (or a long outage) can never cause a retry storm.
  */
-async function once(deps: Deps, address: Address, work: () => Promise<void>): Promise<void> {
-  if (!deps.seen.add(address)) return;
+export const RETRY_DELAYS_MS = [15_000, 60_000] as const;
+
+export const scheduleLater = (task: () => void, delayMs: number): void => {
+  setTimeout(task, delayMs).unref();
+};
+
+async function attempt(
+  deps: Deps,
+  address: Address,
+  work: () => Promise<void>,
+  failures: number,
+): Promise<void> {
   try {
     await work();
   } catch (error) {
-    deps.seen.delete(address);
+    const delay = RETRY_DELAYS_MS[failures];
+    if (delay === undefined) {
+      deps.reportError(new Error(`Giving up on ${address} after ${failures + 1} attempts`, { cause: error }));
+    } else {
+      deps.schedule(() => {
+        attempt(deps, address, work, failures + 1).catch(deps.reportError);
+      }, delay);
+    }
     throw error;
   }
+}
+
+/**
+ * Claim `address` so duplicate events are ignored — the claim is held through the whole retry
+ * cycle (no parallel duplicates, no retry storm). A definitive outcome (announced, or judged
+ * not-a-token) ends it; a transient provider failure schedules a bounded re-attempt, because
+ * for a one-off event (ContractCreated, a token's first mint) no later event will come.
+ */
+async function once(deps: Deps, address: Address, work: () => Promise<void>): Promise<void> {
+  if (!deps.seen.add(address)) return;
+  await attempt(deps, address, work, 0);
 }
 
 /** `ContractCreated(address indexed)` — announce the new contract if it behaves like an ERC-20. */

@@ -58,6 +58,8 @@ async function scanMints(
         announced.push({ token, extras });
         resolve();
       },
+      schedule: () => undefined,
+      reportError: () => undefined,
       seen: new SeenSet(),
     };
     unwatch = watchMints(client, deps);
@@ -135,6 +137,8 @@ describe('Transfer mode against a local fake JSON-RPC node', () => {
       readTokenInfo: (a) => readTokenInfo(client, a),
       readRisk: async () => undefined,
       announce: (token) => announced.push(token),
+      schedule: () => undefined,
+      reportError: () => undefined,
       seen: new SeenSet(),
     });
 
