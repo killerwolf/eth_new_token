@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig } from '../src/config.js';
+import { redactUrls } from '../src/errors.js';
 
 describe('loadConfig', () => {
   const WS = 'wss://eth-mainnet.example.com/v2/secret-key';
@@ -47,5 +48,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig(['Transfer'], { ETH_RPC_URL: secret })).toThrow(/must start with/);
     expect(() => loadConfig(['Transfer'], { ETH_RPC_URL: secret })).not.toThrow(/secret-key/);
     expect(() => loadConfig(['Transfer'], { ETH_RPC_URL: 'not a url' })).toThrow(/valid URL/);
+  });
+
+  it('has error messages that survive the redacting console unchanged', () => {
+    for (const env of [{ ETH_RPC_URL: 'ftp://h.example/x' }, {}, { ETH_RPC_URL: 'nope' }]) {
+      try {
+        loadConfig(['Transfer'], env);
+      } catch (error) {
+        const { message } = error as Error;
+        expect(redactUrls(message)).toBe(message);
+      }
+    }
   });
 });

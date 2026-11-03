@@ -1,7 +1,8 @@
 import { BaseError } from 'viem';
 
 /** URLs routinely carry provider API keys in their path or query: never let one reach a log. */
-const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>)]+/gi;
+/** A scheme followed by a host. A bare "wss://," or "https:// or" in our own messages is not a URL. */
+const URL_PATTERN = /\b(?:https?|wss?):\/\/[\w[][^\s"'<>)]*/gi;
 
 const secrets = new Set<string>();
 
@@ -80,7 +81,7 @@ const flatten = (text: string): string =>
  * redact first, so a secret is never cut in half and left partly visible, then flatten
  * control characters / newlines and cap the length.
  */
-function oneLine(text: string, max = MAX_DETAILS_LENGTH): string {
+export function oneLine(text: string, max = MAX_DETAILS_LENGTH): string {
   const flat = flatten(redactUrls(text));
   const chars = Array.from(flat);
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : flat;

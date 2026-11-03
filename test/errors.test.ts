@@ -40,6 +40,15 @@ describe('describeError', () => {
     expect(describeError(error)).not.toContain(SECRET);
   });
 
+  it('leaves our own mentions of URL schemes alone, and still redacts real URLs', () => {
+    const ours = 'ETH_RPC_URL must start with wss://, ws://, https:// or http://.';
+    expect(redactUrls(ours)).toBe(ours);
+    expect(redactUrls('use the https:// URL')).toBe('use the https:// URL');
+    expect(redactUrls('see (https://api.example.com/v3/KEY) now')).toBe('see (<url>) now');
+    expect(redactUrls('ws://127.0.0.1:8546 and wss://[::1]:8546/k')).toBe('<url> and <url>');
+    expect(redactUrls('https://user:pw@host.example/x')).toBe('<url>');
+  });
+
   it('scrubs URLs from plain errors too', () => {
     const text = describeError(new Error(`failed https://eth.example/v2/${SECRET}?k=1 twice`));
     expect(text).toBe('failed <url> twice');

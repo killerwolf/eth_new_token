@@ -9,6 +9,7 @@ import { scheduleLater, type Deps } from './handlers.js';
 import { formatReport } from './report.js';
 import { installSafeConsole } from './safeConsole.js';
 import { SeenSet } from './seen.js';
+import { diagnoseWebSocket } from './diagnose.js';
 import { addSecret, addSecretsFromUrl, describeError, formatErrorForLog } from './errors.js';
 import { watchContractCreated, watchMints } from './watch.js';
 
@@ -67,8 +68,15 @@ function main(): void {
   // If the event loop drains, the provider connection is gone for good (viem gave up
   // reconnecting). Exit non-zero so `Restart=on-failure` / Docker restart policies kick in.
   process.once('beforeExit', () => {
-    console.error('RPC connection closed and could not be re-established; exiting.');
     process.exitCode = 1;
+    console.error('The RPC connection could not be opened, or was lost for good; exiting.');
+    if (!isWebSocketUrl(config.rpcUrl)) return;
+    // The pending probe keeps the loop alive until it finishes; `once` stops this re-running.
+    diagnoseWebSocket(config.rpcUrl)
+      .then((lines) => {
+        for (const line of lines) console.error(line);
+      })
+      .catch(() => undefined); // diagnostics are best effort
   });
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

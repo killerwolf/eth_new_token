@@ -1,5 +1,5 @@
 import { inspect } from 'node:util';
-import { formatErrorForLog, redactUrls } from './errors.js';
+import { describeError, formatErrorForLog, redactUrls } from './errors.js';
 
 type Logger = (...args: unknown[]) => void;
 
@@ -14,10 +14,9 @@ function scrub(arg: unknown): unknown {
   if (typeof arg !== 'object' || arg === null) return arg;
 
   if (arg instanceof Error) return formatErrorForLog(arg);
-  if (isEvent(arg)) {
-    const { type } = arg as { type?: unknown };
-    return typeof type === 'string' ? `${type} event` : 'event';
-  }
+  // Keep what the event says (the `ws` package reports e.g. "Unexpected server response: 401"),
+  // falling back to its type when it says nothing (Node >= 22's built-in WebSocket).
+  if (isEvent(arg)) return describeError(arg);
   // Any other object: leave it alone unless printing it would reveal a URL (e.g. a `_url` field).
   const printed = inspect(arg, { depth: 4 });
   const scrubbed = redactUrls(printed);

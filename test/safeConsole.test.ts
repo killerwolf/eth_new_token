@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { inspect } from 'node:util';
 import { SocketClosedError } from 'viem';
+import { createServer } from 'node:http';
 import WebSocket from 'ws';
 import { installSafeConsole, makeSafeLogger } from '../src/safeConsole.js';
 
@@ -37,6 +38,23 @@ describe('makeSafeLogger', () => {
     const log = vi.fn();
     makeSafeLogger(log)(event);
     expect(inspect(log.mock.calls, { depth: 6 })).not.toContain('SECRETKEY123');
+  });
+
+  it('keeps the reason a `ws` ErrorEvent carries (e.g. the handshake HTTP status)', async () => {
+    const server = createServer((_, res) => res.writeHead(200).end());
+    server.on('upgrade', (_req, socket) => socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/v3/SECRETKEY123`);
+    const event = await new Promise<unknown>((resolve) => {
+      socket.onerror = resolve;
+    });
+    server.close();
+
+    const log = vi.fn();
+    makeSafeLogger(log)(event);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('401'));
+    expect(inspect(log.mock.calls)).not.toContain('SECRETKEY123');
   });
 
   it('scrubs a URL hidden in an arbitrary object, but leaves clean objects as they are', () => {
