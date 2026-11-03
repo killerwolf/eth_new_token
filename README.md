@@ -1,7 +1,7 @@
 # eth-new-token
 
 Realtime scanner that flags **freshly minted ERC-20 tokens** on Ethereum mainnet, built with
-TypeScript and [viem](https://viem.sh). It subscribes to logs over an Infura WebSocket and prints
+TypeScript and [viem](https://viem.sh). It follows logs over WebSocket (push) or HTTP (polling) and prints
 the token plus links for quick vetting.
 
 ## Modes
@@ -30,14 +30,21 @@ These are heuristics: a clean report is **not** a safety guarantee, and a flag i
 
 ```bash
 npm install
-cp .env.example .env   # then set ETH_WS_URL
+cp .env.example .env   # then set ETH_RPC_URL
 ```
 
-### Choosing a provider
+### Choosing a provider and transport
 
-`ETH_WS_URL` is the full WebSocket endpoint of any **Ethereum mainnet** node (Infura, Alchemy,
-QuickNode, your own). Swap providers by editing that one line. It usually contains your API key, so
-keep `.env` out of git (it is gitignored) and note it is never printed in error messages.
+`ETH_RPC_URL` is the full endpoint of any **Ethereum mainnet** node (Infura, Alchemy, QuickNode,
+your own). Swap providers by editing that one line. The URL scheme picks the transport:
+
+| Scheme | Transport | When to use |
+| --- | --- | --- |
+| `wss://` / `ws://` | Push subscriptions | Lowest latency, recommended |
+| `https://` / `http://` | Polling every ~6 s (`eth_newFilter`, falling back to `eth_getLogs`) | Environments where WebSockets are blocked (proxies, some CI/cloud sandboxes) |
+
+The URL usually contains your API key, so keep `.env` out of git (it is gitignored); it is never
+printed in error messages. The previous variable name `ETH_WS_URL` is still accepted.
 
 ### Notifications (optional)
 
@@ -85,8 +92,9 @@ npm test
 ```
 
 CI runs typecheck, tests and build on Node 20 and 22. The test suite includes an integration test
-that runs the real viem WebSocket subscription path against an in-process fake JSON-RPC node
-(`test/helpers/fakeNode.ts`), so no network or API key is needed.
+that runs both the WebSocket and the HTTP-polling paths of viem against an in-process fake JSON-RPC
+node (`test/helpers/fakeNode.ts`), so no network or API key is needed. It proves the client wiring,
+not behaviour on the live network.
 
 ## Layout
 

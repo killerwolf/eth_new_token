@@ -1,7 +1,7 @@
 import 'dotenv/config';
-import { createPublicClient, webSocket } from 'viem';
+import { createPublicClient, http, webSocket, type Transport } from 'viem';
 import { mainnet } from 'viem/chains';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, isWebSocketUrl, loadConfig } from './config.js';
 import { readTokenInfo, readTotalSupply } from './erc20.js';
 import { createNotifiers, NotifierConfigError } from './notify.js';
 import { readRisk } from './risk.js';
@@ -10,15 +10,22 @@ import { formatReport } from './report.js';
 import { SeenSet } from './seen.js';
 import { describeError, watchContractCreated, watchMints } from './watch.js';
 
+/** Mainnet blocks take ~12s; polling every 6s keeps latency low without burning provider quota. */
+const POLLING_INTERVAL_MS = 6_000;
+
+function createTransport(url: string): Transport {
+  return isWebSocketUrl(url)
+    ? webSocket(url, { keepAlive: { interval: 30_000 }, reconnect: { attempts: 10, delay: 2_000 } })
+    : http(url, { retryCount: 3, timeout: 15_000 });
+}
+
 function main(): void {
   const config = loadConfig(process.argv.slice(2), process.env);
 
   const client = createPublicClient({
     chain: mainnet,
-    transport: webSocket(config.wsUrl, {
-      keepAlive: { interval: 30_000 },
-      reconnect: { attempts: 10, delay: 2_000 },
-    }),
+    transport: createTransport(config.rpcUrl),
+    pollingInterval: POLLING_INTERVAL_MS,
   });
 
   const notifiers = createNotifiers(process.env);
@@ -42,7 +49,8 @@ function main(): void {
   const unwatch =
     config.mode === 'ContractCreated' ? watchContractCreated(client, deps) : watchMints(client, deps);
   const sinks = ['console', ...notifiers.map((n) => n.name)].join(', ');
-  console.error(`Watching Ethereum mainnet (${config.mode}) → ${sinks}. Ctrl+C to stop.`);
+  const via = isWebSocketUrl(config.rpcUrl) ? 'websocket' : 'http polling';
+  console.error(`Watching Ethereum mainnet (${config.mode}, ${via}) → ${sinks}. Ctrl+C to stop.`);
 
   const shutdown = () => {
     unwatch();
