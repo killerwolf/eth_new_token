@@ -56,6 +56,15 @@ export const scheduleLater = (task: () => void, delayMs: number): void => {
   setTimeout(task, delayMs).unref();
 };
 
+/** A broken reporter (logger down) must never turn into an unhandled rejection that kills the scanner. */
+function report(deps: Deps, error: unknown): void {
+  try {
+    deps.reportError(error);
+  } catch {
+    // nothing left to report to
+  }
+}
+
 function followLiquidity(deps: Deps, token: TokenInfo, release: () => void, step = 0): void {
   const delay = LIQUIDITY_RECHECK_DELAYS_MS[step];
   if (delay === undefined) {
@@ -71,17 +80,17 @@ function followLiquidity(deps: Deps, token: TokenInfo, release: () => void, step
           try {
             deps.announceUpdate(token, risk);
           } catch (error) {
-            deps.reportError(error);
+            report(deps, error);
           }
           return;
         }
       } catch (error) {
-        deps.reportError(error); // keep following: the next check may succeed
+        report(deps, error); // keep following: the next check may succeed
       }
       followLiquidity(deps, token, release, step + 1);
     })().catch((error: unknown) => {
       release(); // the chain is dead (e.g. the scheduler threw): do not keep the slot
-      deps.reportError(error);
+      report(deps, error);
     }); // a scheduled task must never become an unhandled rejection
   }, delay);
 }
@@ -102,7 +111,7 @@ function announceAndFollow(deps: Deps, token: TokenInfo, extras: ReportExtras): 
     followLiquidity(deps, token, release);
   } catch (error) {
     release();
-    deps.reportError(error);
+    report(deps, error);
   }
 }
 

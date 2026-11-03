@@ -282,7 +282,7 @@ describe('liquidity follow-up', () => {
     expect(budget.tryAcquire()).toBe(false); // ...exactly once (limit 1)
   });
 
-  it('one token can never free another token\'s slot by releasing twice', async () => {
+  it('survives a broken logger: no unhandled rejection, and slots are accounted exactly', async () => {
     const budget = new FollowUpBudget(2);
     const deps = makeDeps({
       readRisk: states('none', 'none', 'funded'), // A announced, B announced, then A funded
@@ -291,15 +291,36 @@ describe('liquidity follow-up', () => {
         throw new Error('sink down');
       }),
       reportError: vi.fn(() => {
-        throw new Error('logger down'); // makes the chain reject after release() already ran
+        throw new Error('logger down'); // in production index.ts would exit(1) on the rejection
       }),
     });
     const B = '0x00000000000000000000000000000000000000ab' as Address;
     await onMint(deps, mint);
     await onMint(deps, { ...mint, token: B });
-    await tick(deps); // A is funded: update fails, error report fails, chain rejects
+    await tick(deps); // A is funded: the update fails AND the error report fails
 
-    // A held ONE slot of two. B still holds the other, so exactly one slot is free.
+    expect(deps.reportError).toHaveBeenCalled();
+    // A held ONE slot of two and freed it once; B still holds the other.
+    expect(budget.tryAcquire()).toBe(true);
+    expect(budget.tryAcquire()).toBe(false);
+  });
+
+  it('a scheduler that throws mid-chain, with a broken logger, still frees the slot once and does not reject', async () => {
+    const budget = new FollowUpBudget(1);
+    let calls = 0;
+    const deps = makeDeps({
+      readRisk: states('none'),
+      followUps: budget,
+      reportError: vi.fn(() => {
+        throw new Error('logger down');
+      }),
+      schedule: (task) => {
+        if (calls++ === 0) deps.due.push(task);
+        else throw new Error('scheduler down');
+      },
+    });
+    await onMint(deps, mint);
+    await tick(deps);
     expect(budget.tryAcquire()).toBe(true);
     expect(budget.tryAcquire()).toBe(false);
   });
